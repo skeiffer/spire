@@ -53,6 +53,74 @@ type AuthorityStore struct {
 	records   map[string]*authorityRecord
 }
 
+type AuthorityManager struct {
+	store   *AuthorityStore
+	now     func() time.Time
+	onError func(error)
+}
+
+func NewAuthorityManager(clockSkew time.Duration, now func() time.Time, onError func(error)) *AuthorityManager {
+	return &AuthorityManager{store: NewAuthorityStore(clockSkew), now: now, onError: onError}
+}
+
+func (m *AuthorityManager) Initialize(ctx context.Context, issuer X509SVIDIssuer) error {
+	stream, err := issuer.SubscribeAuthoritySnapshots(ctx)
+	if err != nil {
+		return fmt.Errorf("subscribe external issuer authorities: %w", err)
+	}
+	first, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("receive external issuer authority: %w", err)
+	}
+	snapshot, err := SnapshotFromProto(first)
+	if err != nil {
+		return fmt.Errorf("validate external issuer authority: %w", err)
+	}
+	if err := m.store.Publish(snapshot); err != nil {
+		return err
+	}
+	if err := m.store.Activate(snapshot.Version, m.now()); err != nil {
+		return err
+	}
+	go m.consume(ctx, stream)
+	return nil
+}
+
+func (m *AuthorityManager) Active() (Snapshot, error) {
+	return m.store.Active()
+}
+
+func (m *AuthorityManager) MarkIssued(version string, notAfter time.Time) {
+	m.store.MarkIssued(version, notAfter)
+}
+
+func (m *AuthorityManager) consume(ctx context.Context, stream AuthoritySnapshotStream) {
+	for {
+		next, err := stream.Recv()
+		if err != nil {
+			if ctx.Err() == nil {
+				m.store.Taint(m.store.ActiveVersion(), err)
+				m.report(err)
+			}
+			return
+		}
+		snapshot, err := SnapshotFromProto(next)
+		if err == nil {
+			err = m.store.Publish(snapshot)
+		}
+		if err != nil {
+			m.store.Taint(m.store.ActiveVersion(), err)
+			m.report(err)
+		}
+	}
+}
+
+func (m *AuthorityManager) report(err error) {
+	if m.onError != nil {
+		m.onError(err)
+	}
+}
+
 func NewAuthorityStore(clockSkew time.Duration) *AuthorityStore {
 	return &AuthorityStore{clockSkew: clockSkew, records: make(map[string]*authorityRecord)}
 }
