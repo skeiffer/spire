@@ -8,6 +8,7 @@ import (
 	"github.com/spiffe/spire/pkg/server/plugin/nodeattestor"
 	"github.com/spiffe/spire/pkg/server/plugin/notifier"
 	"github.com/spiffe/spire/pkg/server/plugin/upstreamauthority"
+	"github.com/spiffe/spire/pkg/server/plugin/x509svidissuer"
 )
 
 func New() *Catalog {
@@ -22,6 +23,7 @@ type Catalog struct {
 	nodeAttestorRepository
 	notifierRepository
 	upstreamAuthorityRepository
+	x509SVIDIssuerRepository
 }
 
 // We need distinct type names to embed in the Catalog above, since the types
@@ -33,3 +35,4 @@ type keyManagerRepository struct{ keymanager.Repository }
 type nodeAttestorRepository struct{ nodeattestor.Repository }
 type notifierRepository struct{ notifier.Repository }
 type upstreamAuthorityRepository struct{ upstreamauthority.Repository }
+type x509SVIDIssuerRepository struct{ x509svidissuer.Repository }

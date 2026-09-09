@@ -203,7 +203,10 @@ func (s *Server) run(ctx context.Context) (err error) {
 		return err
 	}
 
-	serverCA := s.newCA(metrics, credBuilder, credValidator, healthChecker)
+	serverCA := s.newCA(cat, metrics, credBuilder, credValidator, healthChecker)
+	if err := serverCA.InitializeExternalIssuer(ctx); err != nil {
+		return err
+	}
 
 	// CA manager needs to be initialized before the rotator, otherwise the
 	// server CA plugin won't be able to sign CSRs
@@ -388,7 +391,8 @@ func (s *Server) newCredValidator() (*credvalidator.Validator, error) {
 	})
 }
 
-func (s *Server) newCA(metrics telemetry.Metrics, credBuilder *credtemplate.Builder, credValidator *credvalidator.Validator, healthChecker health.Checker) *ca.CA {
+func (s *Server) newCA(cat catalog.Catalog, metrics telemetry.Metrics, credBuilder *credtemplate.Builder, credValidator *credvalidator.Validator, healthChecker health.Checker) *ca.CA {
+	externalIssuer, _ := cat.GetX509SVIDIssuer()
 	return ca.NewCA(ca.Config{
 		Log:             s.config.Log.WithField(telemetry.SubsystemName, telemetry.CA),
 		Metrics:         metrics,
@@ -398,6 +402,7 @@ func (s *Server) newCA(metrics telemetry.Metrics, credBuilder *credtemplate.Buil
 		HealthChecker:   healthChecker,
 		DisableJWTSVIDs: s.config.DisableJWTSVIDs,
 		DisableWITSVIDs: s.config.DisableWITSVIDs,
+		ExternalIssuer:  externalIssuer,
 	})
 }
 

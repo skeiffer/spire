@@ -1,12 +1,15 @@
 package ca
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
 	"github.com/spiffe/spire/pkg/common/cryptoutil"
 	"github.com/spiffe/spire/pkg/common/health"
 	"github.com/spiffe/spire/pkg/common/telemetry"
@@ -23,6 +27,8 @@ import (
 	"github.com/spiffe/spire/pkg/common/x509util"
 	"github.com/spiffe/spire/pkg/server/credtemplate"
 	"github.com/spiffe/spire/pkg/server/credvalidator"
+	"github.com/spiffe/spire/pkg/server/plugin/x509svidissuer"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -174,6 +180,7 @@ type Config struct {
 	HealthChecker   health.Checker
 	DisableJWTSVIDs bool
 	DisableWITSVIDs bool
+	ExternalIssuer  x509svidissuer.X509SVIDIssuer
 }
 
 type CA struct {
@@ -185,6 +192,7 @@ type CA struct {
 	jwtKey               *JWTKey
 	witKey               *WITKey
 	taintedAuthoritiesCh chan []*x509.Certificate
+	externalAuthorities  *x509svidissuer.AuthorityStore
 }
 
 func NewCA(config Config) *CA {
@@ -197,6 +205,7 @@ func NewCA(config Config) *CA {
 
 		// Notify caller about any tainted authority
 		taintedAuthoritiesCh: make(chan []*x509.Certificate, 1),
+		externalAuthorities:  x509svidissuer.NewAuthorityStore(time.Minute),
 	}
 
 	_ = config.HealthChecker.AddCheck("server.ca", &caHealth{
@@ -205,6 +214,56 @@ func NewCA(config Config) *CA {
 	})
 
 	return ca
+}
+
+func (ca *CA) InitializeExternalIssuer(ctx context.Context) error {
+	if ca.c.ExternalIssuer == nil {
+		return nil
+	}
+	stream, err := ca.c.ExternalIssuer.SubscribeAuthoritySnapshots(ctx)
+	if err != nil {
+		return fmt.Errorf("subscribe external issuer authorities: %w", err)
+	}
+	first, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("receive external issuer authority: %w", err)
+	}
+	snapshot, err := x509svidissuer.SnapshotFromProto(first)
+	if err != nil {
+		return fmt.Errorf("validate external issuer authority: %w", err)
+	}
+	if err := ca.externalAuthorities.Publish(snapshot); err != nil {
+		return err
+	}
+	if err := ca.externalAuthorities.Activate(snapshot.Version, ca.c.Clock.Now()); err != nil {
+		return err
+	}
+	go ca.consumeAuthoritySnapshots(ctx, stream)
+	return nil
+}
+
+func (ca *CA) consumeAuthoritySnapshots(ctx context.Context, stream x509svidissuer.AuthoritySnapshotStream) {
+	for {
+		next, err := stream.Recv()
+		if err != nil {
+			if ctx.Err() == nil {
+				version := ca.externalAuthorities.ActiveVersion()
+				ca.externalAuthorities.Taint(version, err)
+				ca.c.Log.WithError(err).Error("External X509-SVID issuer authority stream closed")
+			}
+			return
+		}
+		snapshot, err := x509svidissuer.SnapshotFromProto(next)
+		if err != nil {
+			ca.externalAuthorities.Taint(ca.externalAuthorities.ActiveVersion(), err)
+			ca.c.Log.WithError(err).Error("Rejected external X509-SVID issuer authority snapshot")
+			continue
+		}
+		if err := ca.externalAuthorities.Publish(snapshot); err != nil {
+			ca.externalAuthorities.Taint(ca.externalAuthorities.ActiveVersion(), err)
+			ca.c.Log.WithError(err).Error("Rejected external X509-SVID issuer authority version")
+		}
+	}
 }
 
 func (ca *CA) X509CA() *X509CA {
@@ -305,7 +364,7 @@ func (ca *CA) SignServerX509SVID(ctx context.Context, params ServerX509SVIDParam
 		return nil, err
 	}
 
-	svidChain, err := ca.signX509SVID(x509CA, template)
+	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, issuerv1.X509SVIDType_X509_SVID_TYPE_SERVER)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +391,7 @@ func (ca *CA) SignAgentX509SVID(ctx context.Context, params AgentX509SVIDParams)
 		return nil, err
 	}
 
-	svidChain, err := ca.signX509SVID(x509CA, template)
+	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, issuerv1.X509SVIDType_X509_SVID_TYPE_AGENT)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +421,7 @@ func (ca *CA) SignWorkloadX509SVID(ctx context.Context, params WorkloadX509SVIDP
 		return nil, err
 	}
 
-	svidChain, err := ca.signX509SVID(x509CA, template)
+	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, issuerv1.X509SVIDType_X509_SVID_TYPE_WORKLOAD)
 	if err != nil {
 		return nil, err
 	}
@@ -446,13 +505,83 @@ func (ca *CA) getX509CA() (*X509CA, []*x509.Certificate, error) {
 	return ca.x509CA, ca.x509CAChain, nil
 }
 
-func (ca *CA) signX509SVID(x509CA *X509CA, template *x509.Certificate) ([]*x509.Certificate, error) {
+func (ca *CA) signX509SVID(ctx context.Context, x509CA *X509CA, template *x509.Certificate, proofCSR []byte, svidType issuerv1.X509SVIDType) ([]*x509.Certificate, error) {
+	if ca.c.ExternalIssuer != nil {
+		return ca.signExternalX509SVID(ctx, template, proofCSR, svidType)
+	}
 	x509SVID, err := x509util.CreateCertificate(template, x509CA.Certificate, template.PublicKey, x509CA.Signer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign X509 SVID: %w", err)
 	}
 	telemetry_server.IncrServerCASignX509Counter(ca.c.Metrics)
 	return makeCertChain(x509CA, x509SVID), nil
+}
+
+func (ca *CA) signExternalX509SVID(ctx context.Context, template *x509.Certificate, proofCSR []byte, svidType issuerv1.X509SVIDType) ([]*x509.Certificate, error) {
+	if len(proofCSR) == 0 {
+		return nil, errors.New("proof CSR is required by configured external X509-SVID issuer")
+	}
+	csr, err := x509.ParseCertificateRequest(proofCSR)
+	if err != nil || csr.CheckSignature() != nil {
+		return nil, errors.New("proof CSR is invalid")
+	}
+	profileKey, err := x509.MarshalPKIXPublicKey(template.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("marshal profile public key: %w", err)
+	}
+	csrKey, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+	if err != nil || !bytes.Equal(profileKey, csrKey) {
+		return nil, errors.New("proof CSR public key does not match profile")
+	}
+	snapshot, err := ca.externalAuthorities.Active()
+	if err != nil {
+		return nil, fmt.Errorf("external authority is not ready: %w", err)
+	}
+	subject, err := asn1.Marshal(template.Subject.ToRDNSequence())
+	if err != nil {
+		return nil, fmt.Errorf("marshal profile subject: %w", err)
+	}
+	req := &issuerv1.IssueX509SVIDRequest{
+		ProofCsr: proofCSR,
+		Profile: &issuerv1.X509SVIDProfile{
+			Type:              svidType,
+			SpiffeId:          template.URIs[0].String(),
+			PublicKey:         profileKey,
+			Subject:           subject,
+			DnsNames:          append([]string(nil), template.DNSNames...),
+			KeyUsages:         toPluginKeyUsages(template.KeyUsage),
+			ExtendedKeyUsages: toPluginExtendedKeyUsages(template.ExtKeyUsage),
+			ExtraExtensions:   toPluginExtensions(template.ExtraExtensions),
+			NotBefore:         timestamppb.New(template.NotBefore),
+			NotAfter:          timestamppb.New(template.NotAfter),
+		},
+		AuthorityVersion: snapshot.Version,
+	}
+	resp, err := ca.c.ExternalIssuer.IssueX509SVID(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("external X509-SVID issuance failed: %w", err)
+	}
+	if resp.GetAuthorityVersion() != snapshot.Version {
+		return nil, errors.New("external issuer returned mismatched authority version")
+	}
+	leaf, err := x509.ParseCertificate(resp.GetLeafCertificate())
+	if err != nil {
+		return nil, errors.New("external issuer returned malformed leaf certificate")
+	}
+	chain := []*x509.Certificate{leaf}
+	for _, raw := range resp.GetIntermediates() {
+		cert, err := x509.ParseCertificate(raw)
+		if err != nil {
+			return nil, errors.New("external issuer returned malformed intermediate certificate")
+		}
+		chain = append(chain, cert)
+	}
+	if err := validateExternalLeaf(template, leaf, chain[1:], snapshot.Roots); err != nil {
+		return nil, fmt.Errorf("external issuer returned invalid X509-SVID: %w", err)
+	}
+	ca.externalAuthorities.MarkIssued(snapshot.Version, leaf.NotAfter)
+	telemetry_server.IncrServerCASignX509Counter(ca.c.Metrics)
+	return chain, nil
 }
 
 func (ca *CA) signJWTSVID(jwtKey *JWTKey, claims map[string]any) (string, error) {
@@ -521,4 +650,100 @@ func (ca *CA) signWITSVID(witKey *WITKey, claims map[string]any) (string, error)
 
 func makeCertChain(x509CA *X509CA, leaf *x509.Certificate) []*x509.Certificate {
 	return append([]*x509.Certificate{leaf}, x509CA.UpstreamChain...)
+}
+
+func toPluginKeyUsages(usage x509.KeyUsage) []issuerv1.X509KeyUsage {
+	var out []issuerv1.X509KeyUsage
+	if usage&x509.KeyUsageDigitalSignature != 0 {
+		out = append(out, issuerv1.X509KeyUsage_X509_KEY_USAGE_DIGITAL_SIGNATURE)
+	}
+	if usage&x509.KeyUsageKeyEncipherment != 0 {
+		out = append(out, issuerv1.X509KeyUsage_X509_KEY_USAGE_KEY_ENCIPHERMENT)
+	}
+	if usage&x509.KeyUsageKeyAgreement != 0 {
+		out = append(out, issuerv1.X509KeyUsage_X509_KEY_USAGE_KEY_AGREEMENT)
+	}
+	return out
+}
+
+func toPluginExtendedKeyUsages(usages []x509.ExtKeyUsage) []issuerv1.X509ExtendedKeyUsage {
+	var out []issuerv1.X509ExtendedKeyUsage
+	for _, usage := range usages {
+		switch usage {
+		case x509.ExtKeyUsageServerAuth:
+			out = append(out, issuerv1.X509ExtendedKeyUsage_X509_EXTENDED_KEY_USAGE_SERVER_AUTH)
+		case x509.ExtKeyUsageClientAuth:
+			out = append(out, issuerv1.X509ExtendedKeyUsage_X509_EXTENDED_KEY_USAGE_CLIENT_AUTH)
+		}
+	}
+	return out
+}
+
+func toPluginExtensions(extensions []pkix.Extension) []*issuerv1.X509Extension {
+	out := make([]*issuerv1.X509Extension, 0, len(extensions))
+	for _, extension := range extensions {
+		out = append(out, &issuerv1.X509Extension{
+			Oid:      extension.Id.String(),
+			Value:    append([]byte(nil), extension.Value...),
+			Critical: extension.Critical,
+		})
+	}
+	return out
+}
+
+func validateExternalLeaf(template, leaf *x509.Certificate, intermediates, roots []*x509.Certificate) error {
+	templateKey, err := x509.MarshalPKIXPublicKey(template.PublicKey)
+	if err != nil {
+		return err
+	}
+	leafKey, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
+	if err != nil || !bytes.Equal(templateKey, leafKey) {
+		return errors.New("public key mismatch")
+	}
+	if leaf.IsCA || !leaf.BasicConstraintsValid {
+		return errors.New("leaf CA constraints are invalid")
+	}
+	expectedSubject, err := asn1.Marshal(template.Subject.ToRDNSequence())
+	if err != nil || !bytes.Equal(expectedSubject, leaf.RawSubject) {
+		return errors.New("certificate subject mismatch")
+	}
+	if len(leaf.URIs) != len(template.URIs) || len(leaf.URIs) != 1 || leaf.URIs[0].String() != template.URIs[0].String() {
+		return errors.New("SPIFFE ID mismatch")
+	}
+	if !slices.Equal(leaf.DNSNames, template.DNSNames) {
+		return errors.New("DNS SAN mismatch")
+	}
+	if leaf.KeyUsage != template.KeyUsage || !slices.Equal(leaf.ExtKeyUsage, template.ExtKeyUsage) {
+		return errors.New("certificate usage mismatch")
+	}
+	for _, expected := range template.ExtraExtensions {
+		found := false
+		for _, actual := range leaf.Extensions {
+			if actual.Id.Equal(expected.Id) && actual.Critical == expected.Critical && bytes.Equal(actual.Value, expected.Value) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("certificate extension %s mismatch", expected.Id)
+		}
+	}
+	if leaf.NotBefore.Before(template.NotBefore.Add(-time.Second)) || leaf.NotAfter.After(template.NotAfter.Add(time.Second)) {
+		return errors.New("certificate validity exceeds authoritative profile")
+	}
+	rootPool := x509.NewCertPool()
+	for _, root := range roots {
+		rootPool.AddCert(root)
+	}
+	intermediatePool := x509.NewCertPool()
+	for _, intermediate := range intermediates {
+		intermediatePool.AddCert(intermediate)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots: rootPool, Intermediates: intermediatePool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}); err != nil {
+		return fmt.Errorf("chain validation failed: %w", err)
+	}
+	return nil
 }
