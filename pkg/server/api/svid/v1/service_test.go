@@ -562,6 +562,10 @@ func TestServiceMintX509SVID(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, resp)
 			require.NotNil(t, resp.Svid)
+			if tt.name == "success" {
+				require.Equal(t, csr, test.ca.LastWorkloadX509SVIDParams().ProofCSR,
+					"the original validated proof CSR must reach the issuer boundary")
+			}
 
 			certChain, err := x509util.RawCertsToCertificates(resp.Svid.CertChain)
 			require.NoError(t, err)

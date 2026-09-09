@@ -3371,6 +3371,10 @@ func TestAttestAgent(t *testing.T) {
 					require.Nil(t, result)
 				default:
 					require.NotNil(t, result)
+					if params := tt.request.GetParams(); params != nil && params.Params != nil && len(params.Params.GetCsr()) > 0 {
+						require.Equal(t, params.Params.Csr, test.ca.LastAgentX509SVIDParams().ProofCSR,
+							"the original validated proof CSR must reach the issuer boundary")
+					}
 					test.assertAttestAgentResult(t, tt.expectedID, result)
 					test.assertAgentWasStored(t, tt.expectedID.String(), tt.expectedSelectors, tt.expectedVersion, agentSpiffeIdAsSelector)
 				}

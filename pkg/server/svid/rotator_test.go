@@ -111,6 +111,24 @@ func (s *RotatorTestSuite) TestRotationSucceeds() {
 	s.Require().NoError(<-errCh)
 }
 
+func (s *RotatorTestSuite) TestRotationConstructsProofCSR() {
+	err := s.r.Initialize(context.Background())
+	s.Require().NoError(err)
+
+	params := s.serverCA.LastServerX509SVIDParams()
+	s.Require().NotEmpty(params.ProofCSR, "server SVID issuance must carry a signer-generated proof CSR")
+
+	csr, err := x509.ParseCertificateRequest(params.ProofCSR)
+	s.Require().NoError(err)
+	s.Require().NoError(csr.CheckSignature())
+
+	csrPublicKey, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+	s.Require().NoError(err)
+	paramsPublicKey, err := x509.MarshalPKIXPublicKey(params.PublicKey)
+	s.Require().NoError(err)
+	s.Equal(paramsPublicKey, csrPublicKey)
+}
+
 func (s *RotatorTestSuite) TestForceRotation() {
 	stream := s.r.Subscribe()
 	t := s.T()

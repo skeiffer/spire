@@ -56,6 +56,10 @@ type DownstreamX509CAParams struct {
 type ServerX509SVIDParams struct {
 	// Public Key
 	PublicKey crypto.PublicKey
+
+	// ProofCSR is the original DER-encoded PKCS#10 proof CSR. The built-in
+	// issuer ignores this field to preserve existing behavior.
+	ProofCSR []byte
 }
 
 // AgentX509SVIDParams are parameters relevant to agent X509-SVID creation
@@ -65,6 +69,10 @@ type AgentX509SVIDParams struct {
 
 	// SPIFFE ID of the agent
 	SPIFFEID spiffeid.ID
+
+	// ProofCSR is the original DER-encoded PKCS#10 proof CSR. The built-in
+	// issuer ignores this field to preserve existing behavior.
+	ProofCSR []byte
 }
 
 // WorkloadX509SVIDParams are parameters relevant to workload X509-SVID creation
@@ -85,6 +93,10 @@ type WorkloadX509SVIDParams struct {
 
 	// Subject of the SVID. Default subject is used if it is empty.
 	Subject pkix.Name
+
+	// ProofCSR is the original DER-encoded PKCS#10 proof CSR. The built-in
+	// issuer ignores this field to preserve existing behavior.
+	ProofCSR []byte
 }
 
 // WorkloadJWTSVIDParams are parameters relevant to workload JWT-SVID creation

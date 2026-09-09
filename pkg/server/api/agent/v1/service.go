@@ -634,6 +634,7 @@ func (s *Service) signSvid(ctx context.Context, agentID spiffeid.ID, csr []byte,
 	x509Svid, err := s.ca.SignAgentX509SVID(ctx, ca.AgentX509SVIDParams{
 		SPIFFEID:  agentID,
 		PublicKey: parsedCsr.PublicKey,
+		ProofCSR:  csr,
 	})
 	if err != nil {
 		return nil, commonapi.MakeErr(log, codes.Internal, "failed to sign X509 SVID", err)
