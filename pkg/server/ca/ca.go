@@ -16,7 +16,6 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
-	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
 	"github.com/spiffe/spire/pkg/common/cryptoutil"
 	"github.com/spiffe/spire/pkg/common/health"
 	"github.com/spiffe/spire/pkg/common/telemetry"
@@ -176,7 +175,7 @@ type Config struct {
 	HealthChecker   health.Checker
 	DisableJWTSVIDs bool
 	DisableWITSVIDs bool
-	ExternalIssuer  x509svidissuer.X509SVIDIssuer
+	X509SVIDIssuer  x509svidissuer.Issuer
 }
 
 type CA struct {
@@ -188,7 +187,6 @@ type CA struct {
 	jwtKey               *JWTKey
 	witKey               *WITKey
 	taintedAuthoritiesCh chan []*x509.Certificate
-	externalAuthorities  *x509svidissuer.AuthorityManager
 }
 
 func NewCA(config Config) *CA {
@@ -201,9 +199,6 @@ func NewCA(config Config) *CA {
 
 		// Notify caller about any tainted authority
 		taintedAuthoritiesCh: make(chan []*x509.Certificate, 1),
-		externalAuthorities: x509svidissuer.NewAuthorityManager(time.Minute, config.Clock.Now, func(err error) {
-			config.Log.WithError(err).Error("External X509-SVID issuer authority state failed")
-		}),
 	}
 
 	_ = config.HealthChecker.AddCheck("server.ca", &caHealth{
@@ -212,13 +207,6 @@ func NewCA(config Config) *CA {
 	})
 
 	return ca
-}
-
-func (ca *CA) InitializeExternalIssuer(ctx context.Context) error {
-	if ca.c.ExternalIssuer == nil {
-		return nil
-	}
-	return ca.externalAuthorities.Initialize(ctx, ca.c.ExternalIssuer)
 }
 
 func (ca *CA) X509CA() *X509CA {
@@ -319,7 +307,7 @@ func (ca *CA) SignServerX509SVID(ctx context.Context, params ServerX509SVIDParam
 		return nil, err
 	}
 
-	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, issuerv1.X509SVIDType_X509_SVID_TYPE_SERVER)
+	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, x509svidissuer.ServerSVID)
 	if err != nil {
 		return nil, err
 	}
@@ -346,7 +334,7 @@ func (ca *CA) SignAgentX509SVID(ctx context.Context, params AgentX509SVIDParams)
 		return nil, err
 	}
 
-	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, issuerv1.X509SVIDType_X509_SVID_TYPE_AGENT)
+	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, x509svidissuer.AgentSVID)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +364,7 @@ func (ca *CA) SignWorkloadX509SVID(ctx context.Context, params WorkloadX509SVIDP
 		return nil, err
 	}
 
-	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, issuerv1.X509SVIDType_X509_SVID_TYPE_WORKLOAD)
+	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, x509svidissuer.WorkloadSVID)
 	if err != nil {
 		return nil, err
 	}
@@ -460,9 +448,14 @@ func (ca *CA) getX509CA() (*X509CA, []*x509.Certificate, error) {
 	return ca.x509CA, ca.x509CAChain, nil
 }
 
-func (ca *CA) signX509SVID(ctx context.Context, x509CA *X509CA, template *x509.Certificate, proofCSR []byte, svidType issuerv1.X509SVIDType) ([]*x509.Certificate, error) {
-	if ca.c.ExternalIssuer != nil {
-		return ca.signExternalX509SVID(ctx, template, proofCSR, svidType)
+func (ca *CA) signX509SVID(ctx context.Context, x509CA *X509CA, template *x509.Certificate, proofCSR []byte, svidType x509svidissuer.SVIDType) ([]*x509.Certificate, error) {
+	if ca.c.X509SVIDIssuer != nil {
+		chain, err := ca.c.X509SVIDIssuer.Issue(ctx, template, proofCSR, svidType)
+		if err != nil {
+			return nil, err
+		}
+		telemetry_server.IncrServerCASignX509Counter(ca.c.Metrics)
+		return chain, nil
 	}
 	x509SVID, err := x509util.CreateCertificate(template, x509CA.Certificate, template.PublicKey, x509CA.Signer)
 	if err != nil {
@@ -470,28 +463,6 @@ func (ca *CA) signX509SVID(ctx context.Context, x509CA *X509CA, template *x509.C
 	}
 	telemetry_server.IncrServerCASignX509Counter(ca.c.Metrics)
 	return makeCertChain(x509CA, x509SVID), nil
-}
-
-func (ca *CA) signExternalX509SVID(ctx context.Context, template *x509.Certificate, proofCSR []byte, svidType issuerv1.X509SVIDType) ([]*x509.Certificate, error) {
-	snapshot, err := ca.externalAuthorities.Active()
-	if err != nil {
-		return nil, fmt.Errorf("external authority is not ready: %w", err)
-	}
-	req, err := x509svidissuer.BuildIssueRequest(template, proofCSR, svidType, snapshot.Version)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := ca.c.ExternalIssuer.IssueX509SVID(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("external X509-SVID issuance failed: %w", err)
-	}
-	chain, err := x509svidissuer.ParseAndValidateResponse(template, resp, snapshot)
-	if err != nil {
-		return nil, err
-	}
-	ca.externalAuthorities.MarkIssued(snapshot.Version, chain[0].NotAfter)
-	telemetry_server.IncrServerCASignX509Counter(ca.c.Metrics)
-	return chain, nil
 }
 
 func (ca *CA) signJWTSVID(jwtKey *JWTKey, claims map[string]any) (string, error) {

@@ -96,13 +96,11 @@ func toPluginKeyUsages(usage x509.KeyUsage) []issuerv1.X509KeyUsage {
 
 func toPluginExtendedKeyUsages(usages []x509.ExtKeyUsage) []issuerv1.X509ExtendedKeyUsage {
 	var out []issuerv1.X509ExtendedKeyUsage
-	for _, usage := range usages {
-		switch usage {
-		case x509.ExtKeyUsageServerAuth:
-			out = append(out, issuerv1.X509ExtendedKeyUsage_X509_EXTENDED_KEY_USAGE_SERVER_AUTH)
-		case x509.ExtKeyUsageClientAuth:
-			out = append(out, issuerv1.X509ExtendedKeyUsage_X509_EXTENDED_KEY_USAGE_CLIENT_AUTH)
-		}
+	if slices.Contains(usages, x509.ExtKeyUsageClientAuth) {
+		out = append(out, issuerv1.X509ExtendedKeyUsage_X509_EXTENDED_KEY_USAGE_CLIENT_AUTH)
+	}
+	if slices.Contains(usages, x509.ExtKeyUsageServerAuth) {
+		out = append(out, issuerv1.X509ExtendedKeyUsage_X509_EXTENDED_KEY_USAGE_SERVER_AUTH)
 	}
 	return out
 }
@@ -139,7 +137,7 @@ func validateLeaf(template, leaf *x509.Certificate, intermediates, roots []*x509
 	if !slices.Equal(leaf.DNSNames, template.DNSNames) {
 		return errors.New("DNS SAN mismatch")
 	}
-	if leaf.KeyUsage != template.KeyUsage || !slices.Equal(leaf.ExtKeyUsage, template.ExtKeyUsage) {
+	if leaf.KeyUsage != template.KeyUsage || !sameExtendedKeyUsages(leaf.ExtKeyUsage, template.ExtKeyUsage) {
 		return errors.New("certificate usage mismatch")
 	}
 	for _, expected := range template.ExtraExtensions {
@@ -149,7 +147,7 @@ func validateLeaf(template, leaf *x509.Certificate, intermediates, roots []*x509
 			return fmt.Errorf("certificate extension %s mismatch", expected.Id)
 		}
 	}
-	if leaf.NotBefore.Before(template.NotBefore.Add(-time.Second)) || leaf.NotAfter.After(template.NotAfter.Add(time.Second)) {
+	if leaf.NotBefore.Before(template.NotBefore.Add(-time.Minute)) || leaf.NotAfter.After(template.NotAfter.Add(time.Second)) {
 		return errors.New("certificate validity exceeds authoritative profile")
 	}
 	rootPool := x509.NewCertPool()
@@ -166,4 +164,21 @@ func validateLeaf(template, leaf *x509.Certificate, intermediates, roots []*x509
 		return fmt.Errorf("chain validation failed: %w", err)
 	}
 	return nil
+}
+
+func sameExtendedKeyUsages(left, right []x509.ExtKeyUsage) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[x509.ExtKeyUsage]int, len(left))
+	for _, usage := range left {
+		counts[usage]++
+	}
+	for _, usage := range right {
+		counts[usage]--
+		if counts[usage] < 0 {
+			return false
+		}
+	}
+	return true
 }

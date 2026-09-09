@@ -42,8 +42,15 @@ func TestBuildIssueRequestAndValidateResponse(t *testing.T) {
 	if request.GetProfile().GetSpiffeId() != id.String() {
 		t.Fatalf("profile SPIFFE ID = %q", request.GetProfile().GetSpiffeId())
 	}
+	if got := request.GetProfile().GetExtendedKeyUsages(); len(got) != 2 ||
+		got[0] != issuerv1.X509ExtendedKeyUsage_X509_EXTENDED_KEY_USAGE_CLIENT_AUTH ||
+		got[1] != issuerv1.X509ExtendedKeyUsage_X509_EXTENDED_KEY_USAGE_SERVER_AUTH {
+		t.Fatalf("extended key usages were not canonicalized: %v", got)
+	}
 
-	leaf := createCertificate(t, template, root, key.Public(), rootKey)
+	leafTemplate := *template
+	leafTemplate.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}
+	leaf := createCertificate(t, &leafTemplate, root, key.Public(), rootKey)
 	chain, err := ParseAndValidateResponse(template, &issuerv1.IssueX509SVIDResponse{
 		LeafCertificate: leaf.Raw, AuthorityVersion: "v1",
 	}, Snapshot{Version: "v1", Roots: []*x509.Certificate{root}})
@@ -69,8 +76,18 @@ func TestBuildIssueRequestRejectsProofKeyMismatch(t *testing.T) {
 		PublicKey: templateKey.Public(), URIs: []*url.URL{id},
 		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Minute),
 	}
+
 	if _, err := BuildIssueRequest(template, proof, issuerv1.X509SVIDType_X509_SVID_TYPE_WORKLOAD, "v1"); err == nil {
 		t.Fatal("expected proof key mismatch")
+	}
+}
+
+func TestExtendedKeyUsageComparisonRejectsDuplicateSubstitution(t *testing.T) {
+	if sameExtendedKeyUsages(
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageClientAuth},
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+	) {
+		t.Fatal("duplicate usage substituted for a required usage")
 	}
 }
 
