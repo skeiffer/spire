@@ -3,6 +3,7 @@ package fakeserverca
 import (
 	"context"
 	"crypto/x509"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ type Options struct {
 }
 
 type CA struct {
+	mu              sync.RWMutex
 	ca              *ca.CA
 	credBuilder     *credtemplate.Builder
 	credValidator   *credvalidator.Validator
@@ -42,6 +44,9 @@ type CA struct {
 	err             error
 	disableJWTSVIDs bool
 	disableWITSVIDs bool
+	serverParams    ca.ServerX509SVIDParams
+	agentParams     ca.AgentX509SVIDParams
+	workloadParams  ca.WorkloadX509SVIDParams
 }
 
 func New(t *testing.T, trustDomain spiffeid.TrustDomain, options *Options) *CA {
@@ -162,6 +167,9 @@ func (c *CA) SignDownstreamX509CA(ctx context.Context, params ca.DownstreamX509C
 }
 
 func (c *CA) SignServerX509SVID(ctx context.Context, params ca.ServerX509SVIDParams) ([]*x509.Certificate, error) {
+	c.mu.Lock()
+	c.serverParams = cloneServerParams(params)
+	c.mu.Unlock()
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -169,6 +177,9 @@ func (c *CA) SignServerX509SVID(ctx context.Context, params ca.ServerX509SVIDPar
 }
 
 func (c *CA) SignAgentX509SVID(ctx context.Context, params ca.AgentX509SVIDParams) ([]*x509.Certificate, error) {
+	c.mu.Lock()
+	c.agentParams = cloneAgentParams(params)
+	c.mu.Unlock()
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -176,6 +187,9 @@ func (c *CA) SignAgentX509SVID(ctx context.Context, params ca.AgentX509SVIDParam
 }
 
 func (c *CA) SignWorkloadX509SVID(ctx context.Context, params ca.WorkloadX509SVIDParams) ([]*x509.Certificate, error) {
+	c.mu.Lock()
+	c.workloadParams = cloneWorkloadParams(params)
+	c.mu.Unlock()
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -210,6 +224,40 @@ func (c *CA) Bundle() []*x509.Certificate {
 
 func (c *CA) Clock() clock.Clock {
 	return c.options.Clock
+}
+
+func (c *CA) LastServerX509SVIDParams() ca.ServerX509SVIDParams {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cloneServerParams(c.serverParams)
+}
+
+func (c *CA) LastAgentX509SVIDParams() ca.AgentX509SVIDParams {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cloneAgentParams(c.agentParams)
+}
+
+func (c *CA) LastWorkloadX509SVIDParams() ca.WorkloadX509SVIDParams {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return cloneWorkloadParams(c.workloadParams)
+}
+
+func cloneServerParams(params ca.ServerX509SVIDParams) ca.ServerX509SVIDParams {
+	params.ProofCSR = append([]byte(nil), params.ProofCSR...)
+	return params
+}
+
+func cloneAgentParams(params ca.AgentX509SVIDParams) ca.AgentX509SVIDParams {
+	params.ProofCSR = append([]byte(nil), params.ProofCSR...)
+	return params
+}
+
+func cloneWorkloadParams(params ca.WorkloadX509SVIDParams) ca.WorkloadX509SVIDParams {
+	params.DNSNames = append([]string(nil), params.DNSNames...)
+	params.ProofCSR = append([]byte(nil), params.ProofCSR...)
+	return params
 }
 
 func (c *CA) X509CATTL() time.Duration {

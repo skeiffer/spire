@@ -1,0 +1,76 @@
+syntax = "proto3";
+package spire.agent.workloadkey.v1;
+option go_package = "github.com/spiffe/spire/proto/private/spire/agent/workloadkey/v1;workloadkeyv1";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service X509KeyBackedWorkloadAPI {
+    rpc FetchX509SVIDs(google.protobuf.Empty) returns (stream X509KeyBackedSVIDResponse);
+    rpc Sign(SignRequest) returns (SignResponse);
+}
+
+message X509KeyBackedSVIDResponse {
+    ProtocolVersion protocol_version = 1;
+    repeated X509KeyBackedSVID svids = 2;
+}
+
+message X509KeyBackedSVID {
+    string spiffe_id = 1;
+    bytes x509_svid = 2;
+    bytes bundle = 3;
+    string hint = 4;
+    KeyCapability key = 5;
+}
+
+message KeyCapability {
+    bytes id = 1;
+    uint64 generation = 2;
+    bytes public_key = 3;
+    KeyAlgorithm algorithm = 4;
+    KeyOperationMode mode = 5;
+    google.protobuf.Timestamp expires_at = 6;
+}
+
+message SignRequest {
+    bytes capability_id = 1;
+    uint64 generation = 2;
+    bytes digest = 3;
+    HashAlgorithm hash_algorithm = 4;
+    SignatureScheme signature_scheme = 5;
+}
+
+message SignResponse {
+    bytes signature = 1;
+}
+
+enum KeyAlgorithm {
+    KEY_ALGORITHM_UNSPECIFIED = 0;
+    KEY_ALGORITHM_RSA_2048 = 1;
+    KEY_ALGORITHM_ECDSA_P256 = 2;
+    KEY_ALGORITHM_ECDSA_P384 = 3;
+}
+
+enum ProtocolVersion {
+    PROTOCOL_VERSION_UNSPECIFIED = 0;
+    PROTOCOL_VERSION_V1 = 1;
+}
+
+enum KeyOperationMode {
+    KEY_OPERATION_MODE_UNSPECIFIED = 0;
+    KEY_OPERATION_MODE_LOCAL_REFERENCE = 1;
+    KEY_OPERATION_MODE_REMOTE_SIGN = 2;
+}
+
+enum HashAlgorithm {
+    HASH_ALGORITHM_UNSPECIFIED = 0;
+    HASH_ALGORITHM_SHA256 = 1;
+    HASH_ALGORITHM_SHA384 = 2;
+}
+
+enum SignatureScheme {
+    SIGNATURE_SCHEME_UNSPECIFIED = 0;
+    SIGNATURE_SCHEME_RSA_PKCS1V15 = 1;
+    SIGNATURE_SCHEME_RSA_PSS = 2;
+    SIGNATURE_SCHEME_ECDSA = 3;
+}

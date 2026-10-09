@@ -5,6 +5,7 @@ import (
 	"github.com/spiffe/spire/pkg/agent/plugin/nodeattestor"
 	"github.com/spiffe/spire/pkg/agent/plugin/svidstore"
 	"github.com/spiffe/spire/pkg/agent/plugin/workloadattestor"
+	"github.com/spiffe/spire/pkg/agent/plugin/workloadkeyprovider"
 )
 
 func New() *Catalog {
@@ -16,6 +17,7 @@ type Catalog struct {
 	nodeAttestorRepository
 	svidStoreRepository
 	workloadAttestorRepository
+	workloadKeyProviderRepository
 }
 
 // We need distinct type names to embed in the Catalog above, since the types
@@ -24,3 +26,4 @@ type keyManagerRepository struct{ keymanager.Repository }
 type nodeAttestorRepository struct{ nodeattestor.Repository }
 type svidStoreRepository struct{ svidstore.Repository }
 type workloadAttestorRepository struct{ workloadattestor.Repository }
+type workloadKeyProviderRepository struct{ workloadkeyprovider.Repository }

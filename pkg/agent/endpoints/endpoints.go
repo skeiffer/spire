@@ -15,9 +15,11 @@ import (
 	healthv1 "github.com/spiffe/spire/pkg/agent/api/health/v1"
 	"github.com/spiffe/spire/pkg/agent/endpoints/sdsv3"
 	"github.com/spiffe/spire/pkg/agent/endpoints/workload"
+	"github.com/spiffe/spire/pkg/agent/endpoints/workloadkey"
 	"github.com/spiffe/spire/pkg/common/api/middleware"
 	"github.com/spiffe/spire/pkg/common/peertracker"
 	"github.com/spiffe/spire/pkg/common/telemetry"
+	workloadkeyv1 "github.com/spiffe/spire/proto/private/spire/agent/workloadkey/v1"
 )
 
 const (
@@ -37,6 +39,7 @@ type Endpoints struct {
 	workloadAPIServer workload_pb.SpiffeWorkloadAPIServer
 	sdsv3Server       secret_v3.SecretDiscoveryServiceServer
 	healthServer      grpc_health_v1.HealthServer
+	workloadKeyServer workloadkeyv1.X509KeyBackedWorkloadAPIServer
 	apiNames          string
 
 	hooks struct {
@@ -60,6 +63,11 @@ func New(c Config) *Endpoints {
 	if c.newHealthServer == nil {
 		c.newHealthServer = func(c healthv1.Config) grpc_health_v1.HealthServer {
 			return healthv1.New(c)
+		}
+	}
+	if !c.DisableWorkloadAPI && c.newWorkloadKeyServer == nil {
+		c.newWorkloadKeyServer = func(c workloadkey.Config) workloadkeyv1.X509KeyBackedWorkloadAPIServer {
+			return workloadkey.New(c)
 		}
 	}
 
@@ -100,6 +108,14 @@ func New(c Config) *Endpoints {
 		Addr:               c.BindAddr,
 		DisableWorkloadAPI: c.DisableWorkloadAPI,
 	})
+	var workloadKeyServer workloadkeyv1.X509KeyBackedWorkloadAPIServer
+	if !c.DisableWorkloadAPI {
+		workloadKeyServer = c.newWorkloadKeyServer(workloadkey.Config{
+			Manager:  c.Manager,
+			Attestor: attestor,
+			Log:      c.Log,
+		})
+	}
 
 	return &Endpoints{
 		addr:              c.BindAddr,
@@ -108,6 +124,7 @@ func New(c Config) *Endpoints {
 		workloadAPIServer: workloadAPIServer,
 		sdsv3Server:       sdsv3Server,
 		healthServer:      healthServer,
+		workloadKeyServer: workloadKeyServer,
 		apiNames:          apiNames(c.DisableWorkloadAPI, c.DisableSDSAPI),
 		hooks: struct {
 			listening chan struct{}
@@ -131,6 +148,9 @@ func (e *Endpoints) ListenAndServe(ctx context.Context) error {
 
 	if e.workloadAPIServer != nil {
 		workload_pb.RegisterSpiffeWorkloadAPIServer(server, e.workloadAPIServer)
+	}
+	if e.workloadKeyServer != nil {
+		workloadkeyv1.RegisterX509KeyBackedWorkloadAPIServer(server, e.workloadKeyServer)
 	}
 	if e.sdsv3Server != nil {
 		secret_v3.RegisterSecretDiscoveryServiceServer(server, e.sdsv3Server)

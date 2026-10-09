@@ -10,6 +10,7 @@ import (
 	"github.com/spiffe/spire/proto/spire/common"
 	"github.com/spiffe/spire/test/spiretest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -37,6 +38,24 @@ func TestPeerTrackerAttestor(t *testing.T) {
 	})
 }
 
+func TestPeerTrackerAttestorPreservesVerifiedClientPID(t *testing.T) {
+	underlying := &recordingAttestor{}
+	attestor := PeerTrackerAttestor{Attestor: underlying}
+	ctx := contextWithWatcher(recordingWatcher{pid: 42048, alive: true})
+
+	for range 2 {
+		selectors, err := attestor.Attest(ctx)
+		require.NoError(t, err)
+		require.NotEmpty(t, selectors)
+	}
+	require.Equal(t, []int{42048, 42048}, underlying.pids)
+
+	_, err := attestor.Attest(context.Background())
+	spiretest.AssertGRPCStatus(t, err, codes.Internal, "peer tracker watcher missing from context")
+	require.Equal(t, []int{42048, 42048}, underlying.pids,
+		"unverified callers must fail before workload attestation")
+}
+
 type FakeAttestor struct{}
 
 func (a FakeAttestor) Attest(_ context.Context, pid int) ([]*common.Selector, error) {
@@ -51,9 +70,13 @@ func (a FakeAttestor) AttestReference(_ context.Context, _ *anypb.Any) ([]*commo
 }
 
 func WithFakeWatcher(alive bool) context.Context {
+	return contextWithWatcher(FakeWatcher(alive))
+}
+
+func contextWithWatcher(watcher peertracker.Watcher) context.Context {
 	return peer.NewContext(context.Background(), &peer.Peer{
 		AuthInfo: peertracker.AuthInfo{
-			Watcher: FakeWatcher(alive),
+			Watcher: watcher,
 		},
 	})
 }
@@ -70,3 +93,30 @@ func (w FakeWatcher) IsAlive() error {
 }
 
 func (w FakeWatcher) PID() int32 { return int32(os.Getpid()) }
+
+type recordingWatcher struct {
+	pid   int32
+	alive bool
+}
+
+func (w recordingWatcher) Close() {}
+func (w recordingWatcher) IsAlive() error {
+	if !w.alive {
+		return errors.New("dead")
+	}
+	return nil
+}
+func (w recordingWatcher) PID() int32 { return w.pid }
+
+type recordingAttestor struct {
+	pids []int
+}
+
+func (a *recordingAttestor) Attest(_ context.Context, pid int) ([]*common.Selector, error) {
+	a.pids = append(a.pids, pid)
+	return []*common.Selector{{Type: "Type", Value: "Value"}}, nil
+}
+
+func (*recordingAttestor) AttestReference(context.Context, *anypb.Any) ([]*common.Selector, error) {
+	return nil, status.Error(codes.Unimplemented, "AttestReference not implemented")
+}

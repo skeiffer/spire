@@ -11,8 +11,10 @@ import (
 	attestor "github.com/spiffe/spire/pkg/agent/attestor/workload"
 	"github.com/spiffe/spire/pkg/agent/endpoints/sdsv3"
 	"github.com/spiffe/spire/pkg/agent/endpoints/workload"
+	"github.com/spiffe/spire/pkg/agent/endpoints/workloadkey"
 	"github.com/spiffe/spire/pkg/agent/manager"
 	"github.com/spiffe/spire/pkg/common/telemetry"
+	workloadkeyv1 "github.com/spiffe/spire/proto/private/spire/agent/workloadkey/v1"
 	"google.golang.org/grpc/health/grpc_health_v1"
 )
 
@@ -72,4 +74,5 @@ type Config struct {
 	newWorkloadAPIServer func(workload.Config) workload_pb.SpiffeWorkloadAPIServer
 	newSDSv3Server       func(sdsv3.Config) secret_v3.SecretDiscoveryServiceServer
 	newHealthServer      func(healthv1.Config) grpc_health_v1.HealthServer
+	newWorkloadKeyServer func(workloadkey.Config) workloadkeyv1.X509KeyBackedWorkloadAPIServer
 }

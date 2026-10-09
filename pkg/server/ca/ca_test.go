@@ -2,6 +2,7 @@ package ca
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -464,6 +465,55 @@ func (s *CATestSuite) TestSignWorkloadX509SVIDChangesSerialNumber() {
 	s.Require().NoError(err)
 	s.Require().Len(svid2, 1)
 	s.Require().NotEqual(0, svid2[0].SerialNumber.Cmp(svid1[0].SerialNumber))
+}
+
+func (s *CATestSuite) TestBuiltInX509SVIDIssuerIgnoresProofCSR() {
+	malformedProofCSR := []byte("not a CSR")
+
+	testCases := []struct {
+		name string
+		sign func() ([]*x509.Certificate, crypto.PublicKey, error)
+	}{
+		{
+			name: "server",
+			sign: func() ([]*x509.Certificate, crypto.PublicKey, error) {
+				params := s.createServerX509SVIDParams()
+				params.ProofCSR = malformedProofCSR
+				chain, err := s.ca.SignServerX509SVID(ctx, params)
+				return chain, params.PublicKey, err
+			},
+		},
+		{
+			name: "agent",
+			sign: func() ([]*x509.Certificate, crypto.PublicKey, error) {
+				params := s.createAgentX509SVIDParams()
+				params.ProofCSR = malformedProofCSR
+				chain, err := s.ca.SignAgentX509SVID(ctx, params)
+				return chain, params.PublicKey, err
+			},
+		},
+		{
+			name: "workload",
+			sign: func() ([]*x509.Certificate, crypto.PublicKey, error) {
+				params := s.createWorkloadX509SVIDParams()
+				params.ProofCSR = malformedProofCSR
+				chain, err := s.ca.SignWorkloadX509SVID(ctx, params)
+				return chain, params.PublicKey, err
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		s.Run(testCase.name, func() {
+			chain, expectedPublicKey, err := testCase.sign()
+			s.Require().NoError(err)
+			s.Require().NotEmpty(chain)
+
+			expectedPublicKeyDER, err := x509.MarshalPKIXPublicKey(expectedPublicKey)
+			s.Require().NoError(err)
+			s.Equal(expectedPublicKeyDER, chain[0].RawSubjectPublicKeyInfo)
+		})
+	}
 }
 
 func (s *CATestSuite) TestNoJWTKeySet() {

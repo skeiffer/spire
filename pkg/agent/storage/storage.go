@@ -45,6 +45,14 @@ type Storage interface {
 
 	// DeleteBootstrapState removes the bootstrap state
 	DeleteBootstrapState() error
+
+	// LoadWorkloadKeyGenerations loads the last allocated opaque workload-key
+	// generation for each registration entry.
+	LoadWorkloadKeyGenerations() (map[string]uint64, error)
+
+	// StoreWorkloadKeyGenerations persists opaque workload-key generation
+	// watermarks without persisting key references or key material.
+	StoreWorkloadKeyGenerations(generations map[string]uint64) error
 }
 
 func Open(dir string) (Storage, error) {
@@ -170,22 +178,48 @@ func (s *storage) DeleteBootstrapState() error {
 	return nil
 }
 
+func (s *storage) LoadWorkloadKeyGenerations() (map[string]uint64, error) {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	if len(s.data.WorkloadKeyGenerations) == 0 {
+		return nil, ErrNotCached
+	}
+	return cloneGenerations(s.data.WorkloadKeyGenerations), nil
+}
+
+func (s *storage) StoreWorkloadKeyGenerations(generations map[string]uint64) error {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	data := s.data
+	data.WorkloadKeyGenerations = cloneGenerations(generations)
+	if err := storeData(s.dir, data); err != nil {
+		return err
+	}
+
+	s.data = data
+	return nil
+}
+
 type storageJSON struct {
-	SVID               [][]byte  `json:"svid"`
-	Bundle             [][]byte  `json:"bundle"`
-	Reattestable       bool      `json:"reattestable"`
-	BootstrapUse       int       `json:"bootstrap_use"`
-	BootstrapStartTime time.Time `json:"bootstrap_start_time"`
-	ConnectionAttempts int       `json:"connection_attempts"`
+	SVID                   [][]byte          `json:"svid"`
+	Bundle                 [][]byte          `json:"bundle"`
+	Reattestable           bool              `json:"reattestable"`
+	BootstrapUse           int               `json:"bootstrap_use"`
+	BootstrapStartTime     time.Time         `json:"bootstrap_start_time"`
+	ConnectionAttempts     int               `json:"connection_attempts"`
+	WorkloadKeyGenerations map[string]uint64 `json:"workload_key_generations,omitempty"`
 }
 
 type storageData struct {
-	SVID               []*x509.Certificate
-	Bundle             []*x509.Certificate
-	Reattestable       bool
-	BootstrapUse       int
-	BootstrapStartTime time.Time
-	ConnectionAttempts int
+	SVID                   []*x509.Certificate
+	Bundle                 []*x509.Certificate
+	Reattestable           bool
+	BootstrapUse           int
+	BootstrapStartTime     time.Time
+	ConnectionAttempts     int
+	WorkloadKeyGenerations map[string]uint64
 }
 
 func (d storageData) MarshalJSON() ([]byte, error) {
@@ -198,12 +232,13 @@ func (d storageData) MarshalJSON() ([]byte, error) {
 		return nil, fmt.Errorf("failed to encode bundle: %w", err)
 	}
 	return json.Marshal(storageJSON{
-		SVID:               svid,
-		Bundle:             bundle,
-		Reattestable:       d.Reattestable,
-		BootstrapUse:       d.BootstrapUse,
-		BootstrapStartTime: d.BootstrapStartTime,
-		ConnectionAttempts: d.ConnectionAttempts,
+		SVID:                   svid,
+		Bundle:                 bundle,
+		Reattestable:           d.Reattestable,
+		BootstrapUse:           d.BootstrapUse,
+		BootstrapStartTime:     d.BootstrapStartTime,
+		ConnectionAttempts:     d.ConnectionAttempts,
+		WorkloadKeyGenerations: cloneGenerations(d.WorkloadKeyGenerations),
 	})
 }
 
@@ -227,7 +262,16 @@ func (d *storageData) UnmarshalJSON(b []byte) error {
 	d.BootstrapUse = j.BootstrapUse
 	d.BootstrapStartTime = j.BootstrapStartTime
 	d.ConnectionAttempts = j.ConnectionAttempts
+	d.WorkloadKeyGenerations = cloneGenerations(j.WorkloadKeyGenerations)
 	return nil
+}
+
+func cloneGenerations(generations map[string]uint64) map[string]uint64 {
+	cloned := make(map[string]uint64, len(generations))
+	for entryID, generation := range generations {
+		cloned[entryID] = generation
+	}
+	return cloned
 }
 
 func storeData(dir string, data storageData) error {

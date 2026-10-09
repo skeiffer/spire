@@ -519,6 +519,7 @@ func TestFetchX509Bundles(t *testing.T) {
 				AllowUnauthenticatedVerifiers: tt.allowUnauthenticatedVerifiers,
 				ManagerErr:                    tt.managerErr,
 			}
+
 			runTest(t, params,
 				func(ctx context.Context, client workloadPB.SpiffeWorkloadAPIClient) {
 					stream, err := client.FetchX509Bundles(ctx, &workloadPB.X509BundlesRequest{})
@@ -530,6 +531,27 @@ func TestFetchX509Bundles(t *testing.T) {
 				})
 		})
 	}
+}
+
+func TestFetchX509BundlesAgentHealthDoesNotAttest(t *testing.T) {
+	ca := testca.New(t, td)
+	bundle := ca.Bundle()
+	attestor := &FakeAttestor{err: errors.New("health probes must not attest")}
+
+	params := testParams{
+		CA:       ca,
+		Updates:  []*cache.X509WorkloadUpdate{{Bundle: bundle}},
+		AsPID:    os.Getpid(),
+		Attestor: attestor,
+	}
+	runTest(t, params, func(ctx context.Context, client workloadPB.SpiffeWorkloadAPIClient) {
+		stream, err := client.FetchX509Bundles(ctx, &workloadPB.X509BundlesRequest{})
+		require.NoError(t, err)
+		resp, err := stream.Recv()
+		require.NoError(t, err)
+		require.NotEmpty(t, resp.Bundles)
+	})
+	require.Zero(t, attestor.calls.Load())
 }
 
 func TestFetchX509Bundles_MultipleUpdates(t *testing.T) {
@@ -2237,6 +2259,7 @@ type testParams struct {
 	AllowUnauthenticatedVerifiers bool
 	AllowedForeignJWTClaims       map[string]struct{}
 	RateLimiter                   workload.RateLimiter
+	Attestor                      *FakeAttestor
 }
 
 func runTest(t *testing.T, params testParams, fn func(ctx context.Context, client workloadPB.SpiffeWorkloadAPIClient)) {
@@ -2250,10 +2273,14 @@ func runTest(t *testing.T, params testParams, fn func(ctx context.Context, clien
 		err:        params.ManagerErr,
 	}
 
+	attestor := params.Attestor
+	if attestor == nil {
+		attestor = &FakeAttestor{selectors: params.Selectors, err: params.AttestErr}
+	}
 	handler := workload.New(workload.Config{
 		TrustDomain:                   td,
 		Manager:                       manager,
-		Attestor:                      &FakeAttestor{selectors: params.Selectors, err: params.AttestErr},
+		Attestor:                      attestor,
 		AllowUnauthenticatedVerifiers: params.AllowUnauthenticatedVerifiers,
 		AllowedForeignJWTClaims:       params.AllowedForeignJWTClaims,
 		RateLimiter:                   params.RateLimiter,
@@ -2389,9 +2416,11 @@ func (s *fakeSubscriber[T]) Finish() {
 type FakeAttestor struct {
 	selectors []*common.Selector
 	err       error
+	calls     atomic.Int32
 }
 
 func (a *FakeAttestor) Attest(context.Context) ([]*common.Selector, error) {
+	a.calls.Add(1)
 	return a.selectors, a.err
 }
 

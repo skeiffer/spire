@@ -40,6 +40,27 @@ SPIRE is a [graduated](https://www.cncf.io/projects/spire/) project of the [Clou
 
 For supported integration versions, see [Supported Integrations](/doc/supported_integrations.md).
 
+## Experimental provider-owned workload keys
+
+This fork adds opt-in external `WorkloadKeyProvider` and `X509SVIDIssuer`
+integration. Entries marked `workload-key-provider-required` use provider-owned
+workload keys and the separate versioned key-backed API. Opaque keys are denied
+through standard X.509-SVID private-key delivery; missing providers, stale
+generations and unsupported capabilities fail closed. Unmarked entries retain
+the normal software-key path. The new upstream WIT cache and Workload API
+handlers are preserved.
+
+The Go module pins the matching public Plugin SDK fork rather than requiring a
+particular sibling checkout. Existing standard SPIRE defaults remain unchanged.
+
+Bounded key-backed diagnostics are opt-in with `SPIRE_WORKLOAD_KEY_DEBUG=1`.
+`SPIRE_WORKLOAD_KEY_DEBUG_RUN_ID` and `SPIRE_WORKLOAD_KEY_CORRELATION_ID` supply
+bounded identifiers. The optional C# client uses `x-spiffe-request-id` and
+`x-spiffe-correlation-id`; both sides use `spire.workloadkey.watch.v1`.
+Diagnostic output is local-only and must not be treated as publication evidence.
+Private-key bytes, capability values and raw request/response bodies are not
+included.
+
 ## Contribute to SPIRE
 
 The SPIFFE community maintains the SPIRE project. Information on the various SIGs and relevant standards can be found in

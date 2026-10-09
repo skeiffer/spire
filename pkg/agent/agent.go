@@ -39,6 +39,7 @@ import (
 	"github.com/spiffe/spire/pkg/common/util"
 	"github.com/spiffe/spire/pkg/common/version"
 	"github.com/spiffe/spire/pkg/common/x509util"
+	"github.com/spiffe/spire/proto/spire/common"
 	_ "golang.org/x/net/trace" // registers handlers on the DefaultServeMux
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -464,6 +465,8 @@ func (a *Agent) newManager(ctx context.Context, sto storage.Storage, cat catalog
 		Log:                  a.c.Log.WithField(telemetry.SubsystemName, telemetry.Manager),
 		Metrics:              metrics,
 		WorkloadKeyType:      a.c.WorkloadKeyType,
+		WorkloadKeyProvider:  cat.GetWorkloadKeyProvider(),
+		RequireOpaqueKey:     requiresWorkloadKeyProvider,
 		Storage:              sto,
 		TrustBundleSources:   a.c.TrustBundleSources,
 		RebootstrapMode:      a.c.RebootstrapMode,
@@ -487,6 +490,7 @@ func (a *Agent) newManager(ctx context.Context, sto storage.Storage, cat catalog
 	if a.c.RebootstrapMode != RebootstrapNever {
 		backoffTime = rebootstrapBackoffMaxElapsedTime
 	}
+
 	initBackoff := backoff.NewBackoff(
 		initBackoffClock,
 		bootstrapBackoffInterval,
@@ -543,6 +547,10 @@ func (a *Agent) newManager(ctx context.Context, sto storage.Storage, cat catalog
 			continue
 		}
 	}
+}
+
+func requiresWorkloadKeyProvider(entry *common.RegistrationEntry) bool {
+	return entry != nil && entry.Hint == "workload-key-provider-required"
 }
 
 func (a *Agent) newSVIDStoreCache(metrics telemetry.Metrics) *storecache.Cache {

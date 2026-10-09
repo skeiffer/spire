@@ -190,6 +190,7 @@ protos := \
 	proto/spire/common/common.proto \
 
 api-protos := \
+	proto/private/spire/agent/workloadkey/v1/x509_key_backed_workload.proto \
 
 plugin-protos := \
 	proto/spire/common/plugin/plugin.proto

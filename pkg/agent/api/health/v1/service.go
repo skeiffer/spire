@@ -64,7 +64,7 @@ func (s *Service) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequ
 	if err != nil {
 		return nil, api.MakeErr(log, codes.InvalidArgument, "could not get Workload API client options", err)
 	}
-	_, err = workloadapi.FetchX509Context(ctx, clientOption)
+	_, err = workloadapi.FetchX509Bundles(ctx, clientOption)
 
 	healthStatus := grpc_health_v1.HealthCheckResponse_SERVING
 	switch status.Code(err) {
@@ -75,7 +75,7 @@ func (s *Service) Check(ctx context.Context, req *grpc_health_v1.HealthCheckRequ
 	default:
 		healthStatus = grpc_health_v1.HealthCheckResponse_NOT_SERVING
 		log.WithFields(logrus.Fields{
-			telemetry.Reason: "unable to fetch X.509 context from Workload API",
+			telemetry.Reason: "unable to fetch X.509 bundles from Workload API",
 			logrus.ErrorKey:  err,
 		}).Warn("Health check failed")
 	}

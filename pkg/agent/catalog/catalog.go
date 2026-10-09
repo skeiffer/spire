@@ -13,6 +13,7 @@ import (
 	"github.com/spiffe/spire/pkg/agent/plugin/nodeattestor/jointoken"
 	"github.com/spiffe/spire/pkg/agent/plugin/svidstore"
 	"github.com/spiffe/spire/pkg/agent/plugin/workloadattestor"
+	"github.com/spiffe/spire/pkg/agent/plugin/workloadkeyprovider"
 	"github.com/spiffe/spire/pkg/common/catalog"
 	"github.com/spiffe/spire/pkg/common/hostservice/metricsservice"
 	"github.com/spiffe/spire/pkg/common/telemetry"
@@ -20,10 +21,11 @@ import (
 )
 
 const (
-	keyManagerType       = "KeyManager"
-	nodeAttestorType     = "NodeAttestor"
-	svidStoreType        = "SVIDStore"
-	workloadattestorType = "WorkloadAttestor"
+	keyManagerType          = "KeyManager"
+	nodeAttestorType        = "NodeAttestor"
+	svidStoreType           = "SVIDStore"
+	workloadattestorType    = "WorkloadAttestor"
+	workloadKeyProviderType = "WorkloadKeyProvider"
 )
 
 var ReconfigureTask = catalog.ReconfigureTask
@@ -33,6 +35,7 @@ type Catalog interface {
 	GetNodeAttestor() nodeattestor.NodeAttestor
 	GetSVIDStoreNamed(name string) (svidstore.SVIDStore, bool)
 	GetWorkloadAttestors() []workloadattestor.WorkloadAttestor
+	GetWorkloadKeyProvider() workloadkeyprovider.Provider
 }
 
 type PluginConfigs = catalog.PluginConfigs
@@ -51,6 +54,7 @@ type Repository struct {
 	nodeAttestorRepository
 	svidStoreRepository
 	workloadAttestorRepository
+	workloadKeyProviderRepository
 
 	log     logrus.FieldLogger
 	catalog *catalog.Catalog
@@ -58,10 +62,11 @@ type Repository struct {
 
 func (repo *Repository) Plugins() map[string]catalog.PluginRepo {
 	return map[string]catalog.PluginRepo{
-		keyManagerType:       &repo.keyManagerRepository,
-		nodeAttestorType:     &repo.nodeAttestorRepository,
-		svidStoreType:        &repo.svidStoreRepository,
-		workloadattestorType: &repo.workloadAttestorRepository,
+		keyManagerType:          &repo.keyManagerRepository,
+		nodeAttestorType:        &repo.nodeAttestorRepository,
+		svidStoreType:           &repo.svidStoreRepository,
+		workloadattestorType:    &repo.workloadAttestorRepository,
+		workloadKeyProviderType: &repo.workloadKeyProviderRepository,
 	}
 }
 

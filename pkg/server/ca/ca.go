@@ -23,6 +23,7 @@ import (
 	"github.com/spiffe/spire/pkg/common/x509util"
 	"github.com/spiffe/spire/pkg/server/credtemplate"
 	"github.com/spiffe/spire/pkg/server/credvalidator"
+	"github.com/spiffe/spire/pkg/server/plugin/x509svidissuer"
 )
 
 const (
@@ -56,6 +57,10 @@ type DownstreamX509CAParams struct {
 type ServerX509SVIDParams struct {
 	// Public Key
 	PublicKey crypto.PublicKey
+
+	// ProofCSR is the original DER-encoded PKCS#10 proof CSR. The built-in
+	// issuer ignores this field to preserve existing behavior.
+	ProofCSR []byte
 }
 
 // AgentX509SVIDParams are parameters relevant to agent X509-SVID creation
@@ -65,6 +70,10 @@ type AgentX509SVIDParams struct {
 
 	// SPIFFE ID of the agent
 	SPIFFEID spiffeid.ID
+
+	// ProofCSR is the original DER-encoded PKCS#10 proof CSR. The built-in
+	// issuer ignores this field to preserve existing behavior.
+	ProofCSR []byte
 }
 
 // WorkloadX509SVIDParams are parameters relevant to workload X509-SVID creation
@@ -85,6 +94,10 @@ type WorkloadX509SVIDParams struct {
 
 	// Subject of the SVID. Default subject is used if it is empty.
 	Subject pkix.Name
+
+	// ProofCSR is the original DER-encoded PKCS#10 proof CSR. The built-in
+	// issuer ignores this field to preserve existing behavior.
+	ProofCSR []byte
 }
 
 // WorkloadJWTSVIDParams are parameters relevant to workload JWT-SVID creation
@@ -165,6 +178,7 @@ type Config struct {
 	HealthChecker   health.Checker
 	DisableJWTSVIDs bool
 	DisableWITSVIDs bool
+	X509SVIDIssuer  x509svidissuer.Issuer
 }
 
 type CA struct {
@@ -297,7 +311,7 @@ func (ca *CA) SignServerX509SVID(ctx context.Context, params ServerX509SVIDParam
 		return nil, err
 	}
 
-	svidChain, err := ca.signX509SVID(x509CA, template)
+	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, x509svidissuer.ServerSVID)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +339,7 @@ func (ca *CA) SignAgentX509SVID(ctx context.Context, params AgentX509SVIDParams)
 		return nil, err
 	}
 
-	svidChain, err := ca.signX509SVID(x509CA, template)
+	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, x509svidissuer.AgentSVID)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +370,7 @@ func (ca *CA) SignWorkloadX509SVID(ctx context.Context, params WorkloadX509SVIDP
 		return nil, err
 	}
 
-	svidChain, err := ca.signX509SVID(x509CA, template)
+	svidChain, err := ca.signX509SVID(ctx, x509CA, template, params.ProofCSR, x509svidissuer.WorkloadSVID)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +454,15 @@ func (ca *CA) getX509CA() (*X509CA, []*x509.Certificate, error) {
 	return ca.x509CA, ca.x509CAChain, nil
 }
 
-func (ca *CA) signX509SVID(x509CA *X509CA, template *x509.Certificate) ([]*x509.Certificate, error) {
+func (ca *CA) signX509SVID(ctx context.Context, x509CA *X509CA, template *x509.Certificate, proofCSR []byte, svidType x509svidissuer.SVIDType) ([]*x509.Certificate, error) {
+	if ca.c.X509SVIDIssuer != nil {
+		chain, err := ca.c.X509SVIDIssuer.Issue(ctx, template, proofCSR, svidType)
+		if err != nil {
+			return nil, err
+		}
+		telemetry_server.IncrServerCASignX509Counter(ca.c.Metrics)
+		return chain, nil
+	}
 	x509SVID, err := x509util.CreateCertificate(template, x509CA.Certificate, template.PublicKey, x509CA.Signer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign X509 SVID: %w", err)

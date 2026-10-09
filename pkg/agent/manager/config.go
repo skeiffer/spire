@@ -13,6 +13,7 @@ import (
 	"github.com/spiffe/spire/pkg/agent/manager/storecache"
 	"github.com/spiffe/spire/pkg/agent/plugin/keymanager"
 	"github.com/spiffe/spire/pkg/agent/plugin/nodeattestor"
+	"github.com/spiffe/spire/pkg/agent/plugin/workloadkeyprovider"
 	"github.com/spiffe/spire/pkg/agent/storage"
 	"github.com/spiffe/spire/pkg/agent/svid"
 	"github.com/spiffe/spire/pkg/agent/trustbundlesources"
@@ -20,6 +21,7 @@ import (
 	"github.com/spiffe/spire/pkg/common/rotationutil"
 	"github.com/spiffe/spire/pkg/common/telemetry"
 	"github.com/spiffe/spire/pkg/common/tlspolicy"
+	"github.com/spiffe/spire/proto/spire/common"
 )
 
 // SyncRetryBackoffConfig configures the exponential backoff applied between
@@ -67,6 +69,8 @@ type Config struct {
 	RebootstrapMode      string
 	RebootstrapDelay     time.Duration
 	WorkloadKeyType      workloadkey.KeyType
+	WorkloadKeyProvider  workloadkeyprovider.Provider
+	RequireOpaqueKey     func(*common.RegistrationEntry) bool
 	SyncInterval         time.Duration
 	SyncRetryBackoff     *SyncRetryBackoffConfig
 	RotationInterval     time.Duration
@@ -153,17 +157,19 @@ func newManager(c *Config) *manager {
 	svidRotator, client := svid.NewRotator(rotCfg)
 
 	m := &manager{
-		bundleCache:    bundleCache,
-		x509Cache:      x509Cache,
-		witCache:       witCache,
-		jwtCache:       jwtCache,
-		c:              c,
-		mtx:            new(sync.RWMutex),
-		svid:           svidRotator,
-		storage:        c.Storage,
-		client:         client,
-		clk:            c.Clk,
-		svidStoreCache: c.SVIDStoreCache,
+		bundleCache:      bundleCache,
+		x509Cache:        x509Cache,
+		witCache:         witCache,
+		jwtCache:         jwtCache,
+		c:                c,
+		mtx:              new(sync.RWMutex),
+		svid:             svidRotator,
+		storage:          c.Storage,
+		client:           client,
+		clk:              c.Clk,
+		svidStoreCache:   c.SVIDStoreCache,
+		keyGenerations:   make(map[string]uint64),
+		activeOpaqueKeys: make(map[string]workloadkeyprovider.Key),
 
 		processedTaintedX509Authorities: make(map[string]struct{}),
 		processedTaintedJWTAuthorities:  make(map[string]struct{}),

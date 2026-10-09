@@ -33,6 +33,7 @@ import (
 	"github.com/spiffe/spire/pkg/server/plugin/nodeattestor/jointoken"
 	"github.com/spiffe/spire/pkg/server/plugin/notifier"
 	"github.com/spiffe/spire/pkg/server/plugin/upstreamauthority"
+	"github.com/spiffe/spire/pkg/server/plugin/x509svidissuer"
 )
 
 const (
@@ -43,6 +44,7 @@ const (
 	nodeAttestorType       = "NodeAttestor"
 	notifierType           = "Notifier"
 	upstreamAuthorityType  = "UpstreamAuthority"
+	x509SVIDIssuerType     = "X509SVIDIssuer"
 )
 
 var ReconfigureTask = catalog.ReconfigureTask
@@ -55,6 +57,7 @@ type Catalog interface {
 	GetKeyManager() keymanager.KeyManager
 	GetNotifiers() []notifier.Notifier
 	GetUpstreamAuthority() (upstreamauthority.UpstreamAuthority, bool)
+	GetX509SVIDIssuer() (x509svidissuer.X509SVIDIssuer, bool)
 }
 
 type PluginConfigs = catalog.PluginConfigs
@@ -80,6 +83,7 @@ type Repository struct {
 	nodeAttestorRepository
 	notifierRepository
 	upstreamAuthorityRepository
+	x509SVIDIssuerRepository
 
 	log      logrus.FieldLogger
 	dsCloser io.Closer
@@ -106,6 +110,7 @@ func (repo *Repository) Plugins() map[string]catalog.PluginRepo {
 		nodeAttestorType:       &repo.nodeAttestorRepository,
 		notifierType:           &repo.notifierRepository,
 		upstreamAuthorityType:  &repo.upstreamAuthorityRepository,
+		x509SVIDIssuerType:     &repo.x509SVIDIssuerRepository,
 	}
 }
 

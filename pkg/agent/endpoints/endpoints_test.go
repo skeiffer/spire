@@ -131,6 +131,7 @@ func TestEndpoints(t *testing.T) {
 					middleware.HealthServiceName,
 					middleware.ServerReflectionServiceName,
 					middleware.ServerReflectionV1AlphaServiceName,
+					"spire.agent.workloadkey.v1.X509KeyBackedWorkloadAPI",
 				}
 				client := grpc_reflection_v1.NewServerReflectionClient(conn)
 
@@ -271,7 +272,7 @@ func TestEndpointsDisableAPIs(t *testing.T) {
 	}{
 		{
 			name:                "both APIs enabled",
-			expectedServices:    append(baseServices, middleware.WorkloadAPIServiceName, middleware.EnvoySDSv3ServiceName),
+			expectedServices:    append(baseServices, middleware.WorkloadAPIServiceName, middleware.EnvoySDSv3ServiceName, "spire.agent.workloadkey.v1.X509KeyBackedWorkloadAPI"),
 			expectWorkloadCode:  codes.OK,
 			expectSDSCode:       codes.OK,
 			expectWorkloadBuilt: true,
@@ -289,7 +290,7 @@ func TestEndpointsDisableAPIs(t *testing.T) {
 		{
 			name:                "SDS API disabled",
 			disableSDSAPI:       true,
-			expectedServices:    append(baseServices, middleware.WorkloadAPIServiceName),
+			expectedServices:    append(baseServices, middleware.WorkloadAPIServiceName, "spire.agent.workloadkey.v1.X509KeyBackedWorkloadAPI"),
 			expectWorkloadCode:  codes.OK,
 			expectSDSCode:       codes.Unimplemented,
 			expectWorkloadBuilt: true,

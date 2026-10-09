@@ -15,6 +15,7 @@ import (
 	"github.com/spiffe/spire/pkg/agent/client"
 	"github.com/spiffe/spire/pkg/agent/manager/cache"
 	"github.com/spiffe/spire/pkg/agent/manager/storecache"
+	"github.com/spiffe/spire/pkg/agent/plugin/workloadkeyprovider"
 	"github.com/spiffe/spire/pkg/agent/storage"
 	"github.com/spiffe/spire/pkg/agent/svid"
 	"github.com/spiffe/spire/pkg/common/backoff"
@@ -153,7 +154,11 @@ type manager struct {
 	lastSync time.Time
 
 	// Cache for 'storable' SVIDs
-	svidStoreCache *storecache.Cache
+	svidStoreCache         *storecache.Cache
+	keyGenerations         map[string]uint64
+	keyGenerationsLoadOnce sync.Once
+	keyGenerationsLoadErr  error
+	activeOpaqueKeys       map[string]workloadkeyprovider.Key
 
 	// These two maps hold onto the synced entries and bundles. They are used
 	// to do efficient revision-based syncing and are updated with any changes
@@ -315,6 +320,10 @@ func (m *manager) CountSVIDStoreX509SVIDs() int {
 // FetchWorkloadUpdates gets the latest workload update for the selectors
 func (m *manager) FetchWorkloadUpdate(selectors []*common.Selector) *cache.X509WorkloadUpdate {
 	return m.x509Cache.FetchWorkloadUpdate(selectors)
+}
+
+func (m *manager) RegistrationEntriesDiagnostic() []*common.RegistrationEntry {
+	return m.x509Cache.Entries()
 }
 
 func (m *manager) FetchJWTSVID(ctx context.Context, entry *common.RegistrationEntry, audience []string) (*client.JWTSVID, error) {

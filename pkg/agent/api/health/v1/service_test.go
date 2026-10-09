@@ -3,6 +3,7 @@ package health_test
 import (
 	"context"
 	"crypto/x509"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -72,7 +73,7 @@ func TestServiceCheck(t *testing.T) {
 					Message: "Health check failed",
 					Data: logrus.Fields{
 						"error":  "rpc error: code = Unavailable desc = ",
-						"reason": "unable to fetch X.509 context from Workload API",
+						"reason": "unable to fetch X.509 bundles from Workload API",
 					},
 				},
 			},
@@ -93,7 +94,7 @@ func TestServiceCheck(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			log, logHook := test.NewNullLogger()
 
-			wlAPI := fakeWorkloadAPI{
+			wlAPI := &fakeWorkloadAPI{
 				code:     tt.wlapiCode,
 				x509SVID: x509SVID,
 				bundle:   bundle,
@@ -124,6 +125,8 @@ func TestServiceCheck(t *testing.T) {
 				return
 			}
 			require.Equal(t, tt.expectServingStatus, resp.Status)
+			require.Zero(t, wlAPI.x509SVIDCalls.Load(),
+				"agent-internal readiness must not request an identity")
 		})
 	}
 }
@@ -131,12 +134,14 @@ func TestServiceCheck(t *testing.T) {
 type fakeWorkloadAPI struct {
 	workload.UnimplementedSpiffeWorkloadAPIServer
 
-	x509SVID *x509svid.SVID
-	bundle   *x509bundle.Bundle
-	code     codes.Code
+	x509SVID      *x509svid.SVID
+	bundle        *x509bundle.Bundle
+	code          codes.Code
+	x509SVIDCalls atomic.Int32
 }
 
-func (w fakeWorkloadAPI) FetchX509SVID(_ *workload.X509SVIDRequest, stream workload.SpiffeWorkloadAPI_FetchX509SVIDServer) error {
+func (w *fakeWorkloadAPI) FetchX509SVID(_ *workload.X509SVIDRequest, stream workload.SpiffeWorkloadAPI_FetchX509SVIDServer) error {
+	w.x509SVIDCalls.Add(1)
 	if w.code != codes.OK {
 		return status.Error(w.code, "")
 	}
@@ -152,6 +157,17 @@ func (w fakeWorkloadAPI) FetchX509SVID(_ *workload.X509SVIDRequest, stream workl
 				X509SvidKey: privateKey,
 				Bundle:      x509util.DERFromCertificates(w.bundle.X509Authorities()),
 			},
+		},
+	})
+}
+
+func (w *fakeWorkloadAPI) FetchX509Bundles(_ *workload.X509BundlesRequest, stream workload.SpiffeWorkloadAPI_FetchX509BundlesServer) error {
+	if w.code != codes.OK {
+		return status.Error(w.code, "")
+	}
+	return stream.Send(&workload.X509BundlesResponse{
+		Bundles: map[string][]byte{
+			w.bundle.TrustDomain().IDString(): x509util.DERFromCertificates(w.bundle.X509Authorities()),
 		},
 	})
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/spiffe/spire/pkg/agent/common/hintsfilter"
 	"github.com/spiffe/spire/pkg/agent/manager"
 	"github.com/spiffe/spire/pkg/agent/manager/cache"
+	"github.com/spiffe/spire/pkg/agent/plugin/workloadkeyprovider"
 	"github.com/spiffe/spire/pkg/common/bundleutil"
 	"github.com/spiffe/spire/pkg/common/jwtsvid"
 	"github.com/spiffe/spire/pkg/common/telemetry"
@@ -295,10 +296,14 @@ func (h *Handler) FetchX509Bundles(_ *workload.X509BundlesRequest, stream worklo
 	start := time.Now()
 	log := rpccontext.Logger(ctx)
 
-	selectors, err := h.c.Attestor.Attest(ctx)
-	if err != nil {
-		loggerWithContextInfo(ctx, log, start, err).Error("Workload attestation failed")
-		return workloadAttestationFailedError(ctx)
+	var selectors []*common.Selector
+	if !isAgent(ctx) {
+		var err error
+		selectors, err = h.c.Attestor.Attest(ctx)
+		if err != nil {
+			loggerWithContextInfo(ctx, log, start, err).Error("Workload attestation failed")
+			return workloadAttestationFailedError(ctx)
+		}
 	}
 
 	if err := h.rateLimit(ctx, MethodFetchX509Bundles, selectors); err != nil {
@@ -460,7 +465,7 @@ func (h *Handler) sendX509BundlesResponse(update *cache.X509WorkloadUpdate, stre
 	// The agent health check currently exercises the Workload API.
 	// Only log if it is not the agent itself.
 	quietLogging := isAgent(ctx)
-	if !h.c.AllowUnauthenticatedVerifiers && !update.HasIdentity() {
+	if !isAgent(ctx) && !h.c.AllowUnauthenticatedVerifiers && !update.HasIdentity() {
 		if !quietLogging {
 			h.logNoIdentityIssued(ctx, log, selectors, start)
 		}
@@ -562,7 +567,7 @@ func composeX509SVIDResponse(update *cache.X509WorkloadUpdate) (*workload.X509SV
 	for _, identity := range update.Identities {
 		id := identity.Entry.SpiffeId
 
-		keyData, err := x509.MarshalPKCS8PrivateKey(identity.PrivateKey)
+		keyData, err := marshalWorkloadPrivateKey(identity.PrivateKey)
 		if err != nil {
 			return nil, fmt.Errorf("marshal key for %v: %w", id, err)
 		}
@@ -680,6 +685,13 @@ func composeWITBundlesResponse(update *cache.WITWorkloadUpdate) (*workload.WITBu
 	return &workload.WITBundlesResponse{
 		Bundles: bundles,
 	}, nil
+}
+
+func marshalWorkloadPrivateKey(signer crypto.Signer) ([]byte, error) {
+	if workloadkeyprovider.IsOpaque(signer) {
+		return nil, errors.New("opaque-required entry is unavailable through the standard Workload API")
+	}
+	return x509.MarshalPKCS8PrivateKey(signer)
 }
 
 func (h *Handler) sendJWTBundlesResponse(update *cache.X509WorkloadUpdate, stream workload.SpiffeWorkloadAPI_FetchJWTBundlesServer, selectors []*common.Selector, log logrus.FieldLogger, previousResponse *workload.JWTBundlesResponse, start time.Time) (*workload.JWTBundlesResponse, error) {
