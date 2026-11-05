@@ -1,9 +1,9 @@
 #!/bin/bash
 
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o conf/server/x509svidissuer \
-    "${REPODIR}/test/fixture/x509svidissuer"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o conf/agent/check-issuer \
-    "${REPODIR}/test/fixture/x509svidissuer/check"
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go -C "${REPODIR}" build \
+    -o "${RUNDIR}/conf/server/x509svidissuer" ./test/fixture/x509svidissuer
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go -C "${REPODIR}" build \
+    -o "${RUNDIR}/conf/agent/check-issuer" ./test/fixture/x509svidissuer/check
 chmod 755 conf/server/x509svidissuer conf/agent/check-issuer
 cat > conf/server/issuer.fragment <<'CONFIG'
     X509SVIDIssuer "fixture" {
