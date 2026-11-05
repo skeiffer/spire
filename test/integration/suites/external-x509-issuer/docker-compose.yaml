@@ -1,0 +1,31 @@
+services:
+  default-server:
+    image: ${SPIRE_ISSUER_SERVER_IMAGE:-spire-server:latest-local}
+    hostname: default-server
+    volumes:
+      - ./conf/server:/opt/spire/conf/server:ro
+    command: ["-config", "/opt/spire/conf/server/server.conf"]
+  external-server:
+    image: ${SPIRE_ISSUER_SERVER_IMAGE:-spire-server:latest-local}
+    hostname: external-server
+    environment:
+      SPIRE_TEST_ISSUER_FAILURE_FILE: /opt/spire/conf/server/fail-issuance
+    volumes:
+      - ./conf/server:/opt/spire/conf/server:ro
+    command: ["-config", "/opt/spire/conf/server/external.conf"]
+  default-agent:
+    image: ${SPIRE_ISSUER_AGENT_IMAGE:-spire-agent:latest-local}
+    hostname: default-agent
+    user: "0"
+    depends_on: [default-server]
+    volumes:
+      - ./conf/agent:/opt/spire/conf/agent:ro
+    command: ["-config", "/opt/spire/conf/agent/agent.conf"]
+  external-agent:
+    image: ${SPIRE_ISSUER_AGENT_IMAGE:-spire-agent:latest-local}
+    hostname: external-agent
+    user: "0"
+    depends_on: [external-server]
+    volumes:
+      - ./conf/external-agent:/opt/spire/conf/agent:ro
+    command: ["-config", "/opt/spire/conf/agent/agent.conf"]

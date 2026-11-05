@@ -1,11 +1,13 @@
 package x509svidissuer
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"math/big"
 	"net/url"
 	"testing"
@@ -35,12 +37,21 @@ func TestBuildIssueRequestAndValidateResponse(t *testing.T) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
 	}
-	proof, err := x509.CreateCertificateRequest(rand.Reader, new(x509.CertificateRequest), key)
+	proof, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: "untrusted subject"},
+		DNSNames: []string{"untrusted.example"},
+		URIs:     []*url.URL{{Scheme: "spiffe", Host: "untrusted.example", Path: "/other"}},
+	}, key)
 	requireNoError(t, err)
 	request, err := BuildIssueRequest(template, proof, issuerv1.X509SVIDType_X509_SVID_TYPE_WORKLOAD, "v1")
 	requireNoError(t, err)
 	if request.GetProfile().GetSpiffeId() != id.String() {
 		t.Fatalf("profile SPIFFE ID = %q", request.GetProfile().GetSpiffeId())
+	}
+	expectedSubject, err := asn1.Marshal(template.Subject.ToRDNSequence())
+	requireNoError(t, err)
+	if !bytes.Equal(request.GetProfile().GetSubject(), expectedSubject) || len(request.GetProfile().GetDnsNames()) != 0 {
+		t.Fatal("proof CSR subject or SANs replaced the authoritative profile")
 	}
 	if got := request.GetProfile().GetExtendedKeyUsages(); len(got) != 2 ||
 		got[0] != issuerv1.X509ExtendedKeyUsage_X509_EXTENDED_KEY_USAGE_CLIENT_AUTH ||

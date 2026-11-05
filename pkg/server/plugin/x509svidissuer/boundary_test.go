@@ -30,7 +30,7 @@ func TestGenericIssuerImplementationHasNoProductAdapterDependencies(t *testing.T
 	}
 	sdkFile, _ := sdkFunction.FileLine(sdkFunction.Entry())
 	paths = append(paths, filepath.Dir(sdkFile))
-	forbidden := regexp.MustCompile(`(?i)\b(pki-?r|cauldron|azurehse|hse[_-]?(http|auth|policy|retry|idempotency|adapter|endpoint))\b`)
+	forbidden := regexp.MustCompile(`(?i)\b(pki-?r|cauldron|azurehse|keyguard|workloadkeyprovider|workloadkey|hse[_-]?(http|auth|policy|retry|idempotency|adapter|endpoint))\b`)
 	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {

@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# Mint creates a fresh key and CSR for every call; it cannot hit the Agent cache.
+touch conf/server/fail-issuance
+if docker compose exec -T external-server /opt/spire/bin/spire-server \
+    x509 mint -spiffeID spiffe://domain.test/fresh-request > mint-output.log 2>&1; then
+    fail-now "configured external issuer failure fell back to successful issuance"
+fi
+docker compose logs external-server > server-output.log
+grep -q "fixture issuance disabled" server-output.log \
+    || fail-now "mint failed for a reason other than the injected issuer error"
+log-success "fresh issuance failed closed without local fallback"

@@ -1,0 +1,18 @@
+#!/bin/bash
+
+for mode in default external; do
+    directory=conf/agent
+    if [ "$mode" = external ]; then
+        directory=conf/external-agent
+    fi
+    docker compose exec -T "${mode}-server" /opt/spire/bin/spire-server \
+        bundle show > "${directory}/bootstrap.crt"
+    token=$(docker compose exec -T "${mode}-server" /opt/spire/bin/spire-server \
+        token generate -spiffeID spiffe://domain.test/node | awk '{print $2}' | tr -d '\r')
+    [ -n "$token" ] || fail-now "missing join token"
+    sed -i.bak "s/TOKEN/${token}/g" "${directory}/agent.conf"
+    docker compose exec -T "${mode}-server" /opt/spire/bin/spire-server \
+        entry create -parentID spiffe://domain.test/node \
+        -spiffeID spiffe://domain.test/workload -selector unix:uid:0 -x509SVIDTTL 30
+done
+docker-up default-agent external-agent

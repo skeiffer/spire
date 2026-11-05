@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/spiffe/spire/pkg/common/x509util"
 	"github.com/spiffe/spire/pkg/server/credtemplate"
 	"github.com/spiffe/spire/pkg/server/credvalidator"
+	"github.com/spiffe/spire/pkg/server/plugin/x509svidissuer"
 	"github.com/spiffe/spire/test/clock"
 	"github.com/spiffe/spire/test/fakes/fakehealthchecker"
 	"github.com/stretchr/testify/require"
@@ -502,6 +504,84 @@ func (s *CATestSuite) TestBuiltInX509SVIDIssuerIgnoresProofCSR() {
 			s.Equal(expectedPublicKeyDER, chain[0].RawSubjectPublicKeyInfo)
 		})
 	}
+}
+
+func (s *CATestSuite) TestExternalX509SVIDIssuerDispatch() {
+	testCases := []struct {
+		name     string
+		svidType x509svidissuer.SVIDType
+		sign     func([]byte) ([]*x509.Certificate, error)
+	}{
+		{
+			name:     "server",
+			svidType: x509svidissuer.ServerSVID,
+			sign: func(proof []byte) ([]*x509.Certificate, error) {
+				params := s.createServerX509SVIDParams()
+				params.ProofCSR = proof
+				return s.ca.SignServerX509SVID(ctx, params)
+			},
+		},
+		{
+			name:     "agent",
+			svidType: x509svidissuer.AgentSVID,
+			sign: func(proof []byte) ([]*x509.Certificate, error) {
+				params := s.createAgentX509SVIDParams()
+				params.ProofCSR = proof
+				return s.ca.SignAgentX509SVID(ctx, params)
+			},
+		},
+		{
+			name:     "workload",
+			svidType: x509svidissuer.WorkloadSVID,
+			sign: func(proof []byte) ([]*x509.Certificate, error) {
+				params := s.createWorkloadX509SVIDParams()
+				params.ProofCSR = proof
+				return s.ca.SignWorkloadX509SVID(ctx, params)
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		s.Run(testCase.name, func() {
+			proof := []byte("proof forwarded to issuer")
+			issuerErr := errors.New("issuer unavailable")
+			for _, fail := range []bool{false, true} {
+				calls := 0
+				var issued *x509.Certificate
+				s.ca.c.X509SVIDIssuer = issuerFunc(func(callCtx context.Context, template *x509.Certificate, gotProof []byte, gotType x509svidissuer.SVIDType) ([]*x509.Certificate, error) {
+					calls++
+					s.Equal(ctx, callCtx)
+					s.Equal(proof, gotProof)
+					s.Equal(testCase.svidType, gotType)
+					if fail {
+						return nil, issuerErr
+					}
+					der, err := x509.CreateCertificate(rand.Reader, template, s.caCert, template.PublicKey, testSigner)
+					s.Require().NoError(err)
+					issued, err = x509.ParseCertificate(der)
+					s.Require().NoError(err)
+					return []*x509.Certificate{issued}, nil
+				})
+
+				chain, err := testCase.sign(proof)
+				s.Equal(1, calls)
+				if fail {
+					s.ErrorIs(err, issuerErr)
+					s.Empty(chain, "configured issuer failures must not fall back to local signing")
+				} else {
+					s.Require().NoError(err)
+					s.Require().Len(chain, 1)
+					s.Same(issued, chain[0])
+				}
+			}
+		})
+	}
+}
+
+type issuerFunc func(context.Context, *x509.Certificate, []byte, x509svidissuer.SVIDType) ([]*x509.Certificate, error)
+
+func (f issuerFunc) Issue(ctx context.Context, template *x509.Certificate, proof []byte, svidType x509svidissuer.SVIDType) ([]*x509.Certificate, error) {
+	return f(ctx, template, proof, svidType)
 }
 
 func (s *CATestSuite) TestNoJWTKeySet() {

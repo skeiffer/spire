@@ -12,6 +12,7 @@ import (
 	"errors"
 	"math/big"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +59,11 @@ func main() {
 }
 
 func (p *plugin) IssueX509SVID(_ context.Context, req *issuerv1.IssueX509SVIDRequest) (*issuerv1.IssueX509SVIDResponse, error) {
+	if failureFile := os.Getenv("SPIRE_TEST_ISSUER_FAILURE_FILE"); failureFile != "" {
+		if _, err := os.Stat(failureFile); !errors.Is(err, os.ErrNotExist) {
+			return nil, status.Error(codes.Unavailable, "fixture issuance disabled")
+		}
+	}
 	if req.GetAuthorityVersion() != authorityVersion {
 		return nil, status.Error(codes.FailedPrecondition, "authority version is not active")
 	}
