@@ -91,7 +91,7 @@ func (s *AuthorityStore) Activate(version string, now time.Time) error {
 		return ErrUnknownAuthority
 	}
 	if next.taint != nil {
-		return fmt.Errorf("%w: %v", ErrAuthorityTainted, next.taint)
+		return fmt.Errorf("%w: %w", ErrAuthorityTainted, next.taint)
 	}
 	for _, root := range next.snapshot.Roots {
 		if now.Before(root.NotBefore) || !now.Before(root.NotAfter) {
@@ -155,7 +155,7 @@ func (s *AuthorityStore) Active() (Snapshot, error) {
 		return Snapshot{}, ErrUnknownAuthority
 	}
 	if record.taint != nil {
-		return Snapshot{}, fmt.Errorf("%w: %v", ErrAuthorityTainted, record.taint)
+		return Snapshot{}, fmt.Errorf("%w: %w", ErrAuthorityTainted, record.taint)
 	}
 	return cloneSnapshot(record.snapshot), nil
 }

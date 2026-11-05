@@ -8,7 +8,6 @@ import (
 	"errors"
 	"math/big"
 	"net/url"
-	"sync"
 	"testing"
 	"time"
 
@@ -42,8 +41,7 @@ func TestHostInitializesPublishesAndIssues(t *testing.T) {
 		},
 		Now: func() time.Time { return now },
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	requireNoError(t, host.Initialize(ctx))
 	if len(published) != 1 || !published[0].Equal(root) {
 		t.Fatal("initial external root was not published")
@@ -90,6 +88,7 @@ func TestHostActivatesOverlappingRolloverAndFailsClosedOnStreamError(t *testing.
 	}
 	stream.snapshots <- authoritySnapshot("v1", root1, now)
 	published := make(chan []*x509.Certificate, 2)
+	failed := make(chan error, 1)
 	host := NewHost(HostConfig{
 		Plugin: &testPlugin{stream: stream},
 		PublishAuthorities: func(_ context.Context, roots []*x509.Certificate) error {
@@ -98,9 +97,9 @@ func TestHostActivatesOverlappingRolloverAndFailsClosedOnStreamError(t *testing.
 		},
 		Now:       func() time.Time { return now },
 		ClockSkew: time.Minute,
+		OnError:   func(err error) { failed <- err },
 	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	requireNoError(t, host.Initialize(ctx))
 	<-published
 
@@ -119,19 +118,16 @@ func TestHostActivatesOverlappingRolloverAndFailsClosedOnStreamError(t *testing.
 	}
 
 	stream.errs <- errors.New("stream failed")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		_, err := host.active()
-		if errors.Is(err, ErrAuthorityTainted) {
-			if state := host.CheckHealth(); !state.Live || state.Ready {
-				t.Fatalf("unexpected health after stream failure: %+v", state)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("host did not fail closed after stream error: %v", err)
-		}
-		time.Sleep(time.Millisecond)
+	select {
+	case <-failed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host did not report stream failure")
+	}
+	if _, err := host.active(); !errors.Is(err, ErrAuthorityTainted) {
+		t.Fatalf("host did not fail closed after stream error: %v", err)
+	}
+	if state := host.CheckHealth(); !state.Live || state.Ready {
+		t.Fatalf("unexpected health after stream failure: %+v", state)
 	}
 }
 
@@ -160,18 +156,21 @@ func (p *testPlugin) IssueX509SVID(_ context.Context, req *issuerv1.IssueX509SVI
 	return p.issue(req), nil
 }
 
-func (p *testPlugin) SubscribeAuthoritySnapshots(context.Context) (AuthoritySnapshotStream, error) {
+func (p *testPlugin) SubscribeAuthoritySnapshots(ctx context.Context) (AuthoritySnapshotStream, error) {
+	p.stream.ctx = ctx
 	return p.stream, nil
 }
 
 type testAuthorityStream struct {
-	mu        sync.Mutex
+	ctx       context.Context
 	snapshots chan *issuerv1.AuthoritySnapshot
 	errs      chan error
 }
 
 func (s *testAuthorityStream) Recv() (*issuerv1.AuthoritySnapshot, error) {
 	select {
+	case <-s.ctx.Done():
+		return nil, s.ctx.Err()
 	case snapshot := <-s.snapshots:
 		return snapshot, nil
 	case err := <-s.errs:

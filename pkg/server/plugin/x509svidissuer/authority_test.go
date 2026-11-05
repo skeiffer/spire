@@ -31,9 +31,13 @@ func TestAuthorityStoreRolloverAndTaint(t *testing.T) {
 	}
 	requireNoError(t, store.Remove("v1", now.Add(2*time.Minute)))
 
-	store.Taint("v2", errors.New("issuer unhealthy"))
-	if _, err := store.Active(); !errors.Is(err, ErrAuthorityTainted) {
-		t.Fatalf("expected tainted authority error, got %v", err)
+	cause := errors.New("issuer unhealthy")
+	store.Taint("v2", cause)
+	if _, err := store.Active(); !errors.Is(err, ErrAuthorityTainted) || !errors.Is(err, cause) {
+		t.Fatalf("expected tainted authority error wrapping its cause, got %v", err)
+	}
+	if err := store.Activate("v2", now); !errors.Is(err, ErrAuthorityTainted) || !errors.Is(err, cause) {
+		t.Fatalf("expected activation error wrapping its cause, got %v", err)
 	}
 }
 
