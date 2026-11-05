@@ -1,0 +1,16 @@
+#!/bin/bash
+
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go -C "${REPODIR}" build \
+    -o "${RUNDIR}/conf/server/x509svidissuer" ./test/fixture/x509svidissuer
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go -C "${REPODIR}" build \
+    -o "${RUNDIR}/conf/agent/check-issuer" ./test/fixture/x509svidissuer/check
+chmod 755 conf/server/x509svidissuer conf/agent/check-issuer
+cat > conf/server/issuer.fragment <<'CONFIG'
+    X509SVIDIssuer "fixture" {
+        plugin_cmd = "/opt/spire/conf/server/x509svidissuer"
+        plugin_data {}
+    }
+CONFIG
+sed '/^plugins {/r conf/server/issuer.fragment' conf/server/server.conf > conf/server/external.conf
+cp -R conf/agent conf/external-agent
+sed -i.bak 's/default-server/external-server/g' conf/external-agent/agent.conf

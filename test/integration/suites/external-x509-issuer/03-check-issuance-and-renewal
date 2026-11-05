@@ -1,0 +1,4 @@
+#!/bin/bash
+
+docker compose exec -T default-agent /opt/spire/conf/agent/check-issuer -renew
+docker compose exec -T external-agent /opt/spire/conf/agent/check-issuer -external -renew

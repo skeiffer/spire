@@ -43,6 +43,7 @@ import (
 	"github.com/spiffe/spire/pkg/server/hostservice/identityprovider"
 	"github.com/spiffe/spire/pkg/server/node"
 	"github.com/spiffe/spire/pkg/server/plugin/bundlepublisher"
+	"github.com/spiffe/spire/pkg/server/plugin/x509svidissuer"
 	"github.com/spiffe/spire/pkg/server/registration"
 	"github.com/spiffe/spire/pkg/server/svid"
 	"google.golang.org/grpc"
@@ -203,7 +204,11 @@ func (s *Server) run(ctx context.Context) (err error) {
 		return err
 	}
 
-	serverCA := s.newCA(metrics, credBuilder, credValidator, healthChecker)
+	issuer, err := s.newX509SVIDIssuer(ctx, cat, healthChecker)
+	if err != nil {
+		return err
+	}
+	serverCA := s.newCA(metrics, credBuilder, credValidator, healthChecker, issuer)
 
 	// CA manager needs to be initialized before the rotator, otherwise the
 	// server CA plugin won't be able to sign CSRs
@@ -389,7 +394,7 @@ func (s *Server) newCredValidator() (*credvalidator.Validator, error) {
 	})
 }
 
-func (s *Server) newCA(metrics telemetry.Metrics, credBuilder *credtemplate.Builder, credValidator *credvalidator.Validator, healthChecker health.Checker) *ca.CA {
+func (s *Server) newCA(metrics telemetry.Metrics, credBuilder *credtemplate.Builder, credValidator *credvalidator.Validator, healthChecker health.Checker, issuer x509svidissuer.Issuer) *ca.CA {
 	return ca.NewCA(ca.Config{
 		Log:             s.config.Log.WithField(telemetry.SubsystemName, telemetry.CA),
 		Metrics:         metrics,
@@ -399,7 +404,27 @@ func (s *Server) newCA(metrics telemetry.Metrics, credBuilder *credtemplate.Buil
 		HealthChecker:   healthChecker,
 		DisableJWTSVIDs: s.config.DisableJWTSVIDs,
 		DisableWITSVIDs: s.config.DisableWITSVIDs,
+		X509SVIDIssuer:  issuer,
 	})
+}
+
+func (s *Server) newX509SVIDIssuer(ctx context.Context, cat catalog.Catalog, healthChecker health.Checker) (x509svidissuer.Issuer, error) {
+	plugin, ok := cat.GetX509SVIDIssuer()
+	if !ok {
+		return nil, nil
+	}
+	host := x509svidissuer.NewHost(x509svidissuer.HostConfig{
+		Plugin:             plugin,
+		PublishAuthorities: x509svidissuer.NewBundlePublisher(cat.GetDataStore(), s.config.TrustDomain.IDString()),
+		OnError: func(err error) {
+			s.config.Log.WithError(err).Error("External X509-SVID issuer authority state failed")
+		},
+		HealthChecker: healthChecker,
+	})
+	if err := host.Initialize(ctx); err != nil {
+		return nil, err
+	}
+	return host, nil
 }
 
 func (s *Server) newCAManager(ctx context.Context, cat catalog.Catalog, metrics telemetry.Metrics, serverCA *ca.CA, credBuilder *credtemplate.Builder, credValidator *credvalidator.Validator) (*manager.Manager, error) {
