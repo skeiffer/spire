@@ -81,26 +81,29 @@ type DownstreamX509CAParams struct {
 }
 
 type ServerX509SVIDParams struct {
-	ParentChain   []*x509.Certificate
-	PublicKey     crypto.PublicKey
-	ExpirationCap time.Time
+	ParentChain       []*x509.Certificate
+	PublicKey         crypto.PublicKey
+	ExpirationCap     time.Time
+	ParentIndependent bool
 }
 
 type AgentX509SVIDParams struct {
-	ParentChain   []*x509.Certificate
-	PublicKey     crypto.PublicKey
-	SPIFFEID      spiffeid.ID
-	ExpirationCap time.Time
+	ParentChain       []*x509.Certificate
+	PublicKey         crypto.PublicKey
+	SPIFFEID          spiffeid.ID
+	ExpirationCap     time.Time
+	ParentIndependent bool
 }
 
 type WorkloadX509SVIDParams struct {
-	ParentChain   []*x509.Certificate
-	PublicKey     crypto.PublicKey
-	SPIFFEID      spiffeid.ID
-	DNSNames      []string
-	TTL           time.Duration
-	Subject       pkix.Name
-	ExpirationCap time.Time
+	ParentChain       []*x509.Certificate
+	PublicKey         crypto.PublicKey
+	SPIFFEID          spiffeid.ID
+	DNSNames          []string
+	TTL               time.Duration
+	Subject           pkix.Name
+	ExpirationCap     time.Time
+	ParentIndependent bool
 }
 
 type WorkloadJWTSVIDParams struct {
@@ -263,7 +266,7 @@ func (b *Builder) BuildDownstreamX509CATemplate(ctx context.Context, params Down
 }
 
 func (b *Builder) BuildServerX509SVIDTemplate(ctx context.Context, params ServerX509SVIDParams) (*x509.Certificate, error) {
-	tmpl, err := b.buildX509SVIDTemplate(b.serverID, params.PublicKey, params.ParentChain, pkix.Name{}, 0, params.ExpirationCap)
+	tmpl, err := b.buildX509SVIDTemplate(b.serverID, params.PublicKey, params.ParentChain, pkix.Name{}, 0, params.ExpirationCap, params.ParentIndependent)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +283,7 @@ func (b *Builder) BuildServerX509SVIDTemplate(ctx context.Context, params Server
 }
 
 func (b *Builder) BuildAgentX509SVIDTemplate(ctx context.Context, params AgentX509SVIDParams) (*x509.Certificate, error) {
-	tmpl, err := b.buildX509SVIDTemplate(params.SPIFFEID, params.PublicKey, params.ParentChain, pkix.Name{}, b.config.AgentSVIDTTL, params.ExpirationCap)
+	tmpl, err := b.buildX509SVIDTemplate(params.SPIFFEID, params.PublicKey, params.ParentChain, pkix.Name{}, b.config.AgentSVIDTTL, params.ExpirationCap, params.ParentIndependent)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +305,7 @@ func (b *Builder) BuildWorkloadX509SVIDTemplate(ctx context.Context, params Work
 		subject = params.Subject
 	}
 
-	tmpl, err := b.buildX509SVIDTemplate(params.SPIFFEID, params.PublicKey, params.ParentChain, subject, params.TTL, params.ExpirationCap)
+	tmpl, err := b.buildX509SVIDTemplate(params.SPIFFEID, params.PublicKey, params.ParentChain, subject, params.TTL, params.ExpirationCap, params.ParentIndependent)
 	if err != nil {
 		return nil, err
 	}
@@ -439,8 +442,8 @@ func (b *Builder) buildX509CATemplate(publicKey crypto.PublicKey, parentChain []
 	return tmpl, nil
 }
 
-func (b *Builder) buildX509SVIDTemplate(spiffeID spiffeid.ID, publicKey crypto.PublicKey, parentChain []*x509.Certificate, subject pkix.Name, ttl time.Duration, expirationCap time.Time) (*x509.Certificate, error) {
-	if len(parentChain) == 0 {
+func (b *Builder) buildX509SVIDTemplate(spiffeID spiffeid.ID, publicKey crypto.PublicKey, parentChain []*x509.Certificate, subject pkix.Name, ttl time.Duration, expirationCap time.Time, parentIndependent bool) (*x509.Certificate, error) {
+	if len(parentChain) == 0 && !parentIndependent {
 		return nil, errors.New("parent chain required to build X509-SVID template")
 	}
 	if spiffeID.IsZero() {
@@ -450,7 +453,13 @@ func (b *Builder) buildX509SVIDTemplate(spiffeID spiffeid.ID, publicKey crypto.P
 		return nil, fmt.Errorf("invalid X509-SVID ID: %w", err)
 	}
 
-	tmpl, err := b.buildBaseTemplate(spiffeID, publicKey, parentChain)
+	var tmpl *x509.Certificate
+	var err error
+	if parentIndependent {
+		tmpl, err = b.buildParentIndependentBaseTemplate(spiffeID, publicKey)
+	} else {
+		tmpl, err = b.buildBaseTemplate(spiffeID, publicKey, parentChain)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -470,6 +479,17 @@ func (b *Builder) buildX509SVIDTemplate(spiffeID spiffeid.ID, publicKey crypto.P
 	}
 
 	return tmpl, nil
+}
+
+func (b *Builder) buildParentIndependentBaseTemplate(spiffeID spiffeid.ID, publicKey crypto.PublicKey) (*x509.Certificate, error) {
+	if _, err := x509.MarshalPKIXPublicKey(publicKey); err != nil {
+		return nil, err
+	}
+	return &x509.Certificate{
+		URIs:                  []*url.URL{spiffeID.URL()},
+		BasicConstraintsValid: true,
+		PublicKey:             publicKey,
+	}, nil
 }
 
 func (b *Builder) buildBaseTemplate(spiffeID spiffeid.ID, publicKey crypto.PublicKey, parentChain []*x509.Certificate) (*x509.Certificate, error) {

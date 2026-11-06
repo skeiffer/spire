@@ -1,0 +1,9 @@
+#!/bin/bash
+
+cd "${REPODIR}"
+GOWORK=off make build GOPARALLEL=2
+GOWORK=off go build -o bin/x509svidissuer-fixture ./test/fixture/x509svidissuer
+docker build --target fixture -t spire-external-decoupled:latest-local \
+    -f "${ROOTDIR}/suites/external-x509-issuer-decoupled/Dockerfile" .
+cd "${RUNDIR}"
+docker compose run --rm prepare

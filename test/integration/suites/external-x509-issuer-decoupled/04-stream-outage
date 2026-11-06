@@ -1,0 +1,11 @@
+#!/bin/bash
+
+source "${RUNDIR}/_common"
+fixture control -version v2 -stream-error
+wait-failure mint-leaf server1
+wait-failure mint-leaf server2
+fixture verify-tokens
+docker compose exec -T server2 /opt/spire/bin/x509svidissuer-fixture verify-tokens
+fixture control -version v2
+wait-success mint-leaf server1
+wait-success mint-leaf server2

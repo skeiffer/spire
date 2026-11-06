@@ -76,6 +76,24 @@ For example, if downgrading from version 1.2.3 to 1.1.1:
 
 Note that while a rolling downgrade is highly recommended, it is not strictly required. SPIRE Server supports zero-downtime downgrades so long as there is more than one SPIRE Server in the cluster.
 
+## External X.509 issuer development extension
+
+The fork's opt-in `X509SVIDIssuer` backend does not change the default internal
+or UpstreamAuthority upgrade paths. It is not a generally released or
+maintainer-approved production feature, nor an automatic compatibility exemption.
+
+An external-mode cluster must remain uniformly external. Rollback requires a
+binary that understands its versioned external authority and token metadata,
+or an explicitly verified matching restore. Removing the plugin or selecting an
+internal-only binary would create another hierarchy; this is a mode migration,
+not a supported rollback. Do not remove published trust needed by outstanding
+credentials. Preserve the independent provisioning record, public metadata, and
+matching KeyManager identities and availability together. Metadata alone cannot
+recover missing private keys.
+
+See the [external issuer operations guide](plugin_server_x509svidissuer.md) for
+first provisioning, staging, state-loss handling, and protocol limitations.
+
 ## Experimental Features
 
 Certain SPIRE features are considered experimental. These features are enabled through the experimental section of the configuration. A feature may be introduced as experimental for a variety of reasons such as a lack of testing, inexperience with underlying dependencies or platforms, concerns around usability or security, etc. While an experimental feature matures it may undergo many changes in behavior, configuration shape, and performance. It may even be removed. In other words, these features are not considered stable.

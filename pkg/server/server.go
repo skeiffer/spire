@@ -8,6 +8,8 @@ import (
 	"net/http"
 	_ "net/http/pprof" //nolint: gosec // import registers routes on DefaultServeMux
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -29,22 +31,27 @@ import (
 	"github.com/spiffe/spire/pkg/server/authpolicy"
 	bundle_client "github.com/spiffe/spire/pkg/server/bundle/client"
 	ds_pubmanager "github.com/spiffe/spire/pkg/server/bundle/datastore"
+	"github.com/spiffe/spire/pkg/server/bundle/maintenance"
 	"github.com/spiffe/spire/pkg/server/bundle/pubmanager"
 	"github.com/spiffe/spire/pkg/server/ca"
 	"github.com/spiffe/spire/pkg/server/ca/manager"
 	"github.com/spiffe/spire/pkg/server/ca/rotator"
 	"github.com/spiffe/spire/pkg/server/catalog"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 	"github.com/spiffe/spire/pkg/server/credtemplate"
 	"github.com/spiffe/spire/pkg/server/credvalidator"
 	"github.com/spiffe/spire/pkg/server/datastore"
 	"github.com/spiffe/spire/pkg/server/endpoints"
 	"github.com/spiffe/spire/pkg/server/endpoints/bundle"
+	"github.com/spiffe/spire/pkg/server/externalstate"
 	"github.com/spiffe/spire/pkg/server/hostservice/agentstore"
 	"github.com/spiffe/spire/pkg/server/hostservice/identityprovider"
 	"github.com/spiffe/spire/pkg/server/node"
 	"github.com/spiffe/spire/pkg/server/plugin/bundlepublisher"
+	"github.com/spiffe/spire/pkg/server/plugin/x509svidissuer"
 	"github.com/spiffe/spire/pkg/server/registration"
 	"github.com/spiffe/spire/pkg/server/svid"
+	"github.com/spiffe/spire/pkg/server/tokenauthority"
 	"google.golang.org/grpc"
 )
 
@@ -78,6 +85,9 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) ValidateConfig(ctx context.Context) (map[string][]string, error) {
+	if err := validateX509SVIDIssuerSelection(s.config.PluginConfigs); err != nil {
+		return nil, err
+	}
 	return catalog.ValidateConfig(ctx, catalog.Config{
 		Log:              s.config.Log.WithField(telemetry.SubsystemName, telemetry.Catalog),
 		Metrics:          telemetry.Blackhole{},
@@ -90,6 +100,27 @@ func (s *Server) ValidateConfig(ctx context.Context) (map[string][]string, error
 }
 
 func (s *Server) run(ctx context.Context) (err error) {
+	if err := validateX509SVIDIssuerSelection(s.config.PluginConfigs); err != nil {
+		return err
+	}
+	ctx, cancelStartup := context.WithCancel(ctx)
+	defer cancelStartup()
+	externalSelected := hasExternalIssuer(s.config.PluginConfigs)
+	var stateOwner externalstate.Owner
+	if externalSelected {
+		stateOwner, err = externalstate.Open(s.config.ExternalX509ControlDir, s.config.DataDir, s.config.TrustDomain.Name(), s.config.PluginConfigs)
+		if err != nil {
+			return fmt.Errorf("external issuer preflight: %w", err)
+		}
+		defer stateOwner.Close()
+	} else {
+		if s.config.ExternalX509ControlDir != "" {
+			return errors.New("external_x509_control_dir requires X509SVIDIssuer; changing to an internal CA is not a supported rollback")
+		}
+		if _, err := os.Lstat(filepath.Join(s.config.DataDir, "external-x509")); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("external issuer state exists; restore compatible external configuration instead of creating an internal CA")
+		}
+	}
 	// Log configuration values that are useful for debugging
 	s.config.Log.WithFields(logrus.Fields{
 		telemetry.AdminIDs:       s.config.AdminIDs,
@@ -186,7 +217,15 @@ func (s *Server) run(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	cat.DataStore = ds_pubmanager.WithBundleUpdateCallback(cat.DataStore, bundlePublishingManager.BundleUpdated)
+	var bundleMaintenance maintenance.Manager
+	cat.DataStore = ds_pubmanager.WithBundleUpdateCallback(cat.DataStore, func() {
+		bundlePublishingManager.BundleUpdated()
+		bundleMaintenance.BundleUpdated()
+	})
+	bundleMaintenance = maintenance.New(maintenance.Config{
+		DataStore: cat.DataStore, TrustDomain: s.config.TrustDomain.IDString(),
+		Notifiers: cat.GetNotifiers(), Log: s.config.Log,
+	})
 
 	err = s.validateTrustDomain(ctx, cat.GetDataStore())
 	if err != nil {
@@ -203,19 +242,51 @@ func (s *Server) run(ctx context.Context) (err error) {
 		return err
 	}
 
-	serverCA := s.newCA(metrics, credBuilder, credValidator, healthChecker)
-
-	// CA manager needs to be initialized before the rotator, otherwise the
-	// server CA plugin won't be able to sign CSRs
-	caManager, err := s.newCAManager(ctx, cat, metrics, serverCA, credBuilder, credValidator)
-	if err != nil {
-		return err
-	}
-	defer caManager.Close()
-
-	caSync, err := s.newCASync(ctx, healthChecker, caManager)
-	if err != nil {
-		return err
+	var serverCA credentialissuer.Issuer
+	var authorityManager credentialissuer.AuthorityAdmin
+	var credentialLifecycle func(context.Context) error
+	if externalSelected {
+		externalIssuer, err := s.newX509SVIDIssuer(ctx, cat, healthChecker, stateOwner)
+		if err != nil {
+			return err
+		}
+		defer externalIssuer.Close()
+		tokens, err := tokenauthority.NewManager(ctx, tokenauthority.Config{
+			KeyManager: cat.GetKeyManager(), DataStore: cat.DataStore,
+			Builder: credBuilder, Validator: credValidator, Metrics: metrics,
+			TrustDomain: s.config.TrustDomain, StateDir: stateOwner.StateDir(),
+			Binding: stateOwner.Binding(), Fresh: stateOwner.IsFresh(),
+			WriteFile:  stateOwner.WriteFile,
+			JWTKeyType: s.config.JWTKeyType, WITKeyType: s.config.WITKeyType,
+			DisableJWTSVIDs: s.config.DisableJWTSVIDs, DisableWITSVIDs: s.config.DisableWITSVIDs,
+			Log: s.config.Log,
+		})
+		if err != nil {
+			return err
+		}
+		serverCA = &credentialissuer.External{
+			TokenIssuer: tokens, Builder: credBuilder, Validator: credValidator,
+			Leaf: externalIssuer, Metrics: metrics,
+		}
+		authorityManager = tokens
+		if err := healthChecker.AddCheck("server.tokens", tokens); err != nil {
+			return fmt.Errorf("register token authority health check: %w", err)
+		}
+		credentialLifecycle = func(ctx context.Context) error {
+			return util.RunTasks(ctx, tokens.Run, bundleMaintenance.Run)
+		}
+	} else {
+		localCA := s.newCA(metrics, credBuilder, credValidator, healthChecker)
+		caManager, err := s.newCAManager(ctx, cat, metrics, localCA, credBuilder, credValidator)
+		if err != nil {
+			return err
+		}
+		defer caManager.Close()
+		caSync, err := s.newCASync(ctx, healthChecker, caManager)
+		if err != nil {
+			return err
+		}
+		serverCA, authorityManager, credentialLifecycle = localCA, manager.NewAuthorityAdmin(caManager), caSync.Run
 	}
 
 	svidRotator, err = s.newSVIDRotator(ctx, serverCA, metrics)
@@ -230,7 +301,7 @@ func (s *Server) run(ctx context.Context) (err error) {
 
 	bundleManager := s.newBundleManager(cat, metrics)
 
-	endpointsServer, err := s.newEndpointsServer(ctx, cat, svidRotator, serverCA, metrics, caManager, authPolicyEngine, bundleManager)
+	endpointsServer, err := s.newEndpointsServer(ctx, cat, svidRotator, serverCA, metrics, authorityManager, authPolicyEngine, bundleManager)
 	if err != nil {
 		return err
 	}
@@ -256,6 +327,11 @@ func (s *Server) run(ctx context.Context) (err error) {
 	}); err != nil {
 		return fmt.Errorf("failed setting AgentStore deps: %w", err)
 	}
+	if externalSelected {
+		if err := bundleMaintenance.Initialize(ctx); err != nil {
+			return fmt.Errorf("initialize external bundle maintenance: %w", err)
+		}
+	}
 
 	registrationManager := s.newRegistrationManager(cat, metrics)
 
@@ -264,7 +340,7 @@ func (s *Server) run(ctx context.Context) (err error) {
 	}
 
 	tasks := []func(context.Context) error{
-		caSync.Run,
+		credentialLifecycle,
 		svidRotator.Run,
 		endpointsServer.ListenAndServe,
 		metrics.ListenAndServe,
@@ -298,6 +374,39 @@ func (s *Server) run(ctx context.Context) (err error) {
 		err = nil
 	}
 	return err
+}
+
+func validateX509SVIDIssuerSelection(configs catalog.PluginConfigs) error {
+	issuerConfigs, remaining := configs.FilterByType("X509SVIDIssuer")
+	upstreamConfigs, _ := remaining.FilterByType("UpstreamAuthority")
+	enabledIssuers := 0
+	for _, config := range issuerConfigs {
+		if config.IsEnabled() {
+			enabledIssuers++
+		}
+	}
+	if enabledIssuers > 1 {
+		return errors.New("only one X509SVIDIssuer plugin may be enabled")
+	}
+	if enabledIssuers == 0 {
+		return nil
+	}
+	for _, config := range upstreamConfigs {
+		if config.IsEnabled() {
+			return errors.New("X509SVIDIssuer and UpstreamAuthority cannot be configured together")
+		}
+	}
+	return nil
+}
+
+func hasExternalIssuer(configs catalog.PluginConfigs) bool {
+	issuers, _ := configs.FilterByType("X509SVIDIssuer")
+	for _, config := range issuers {
+		if config.IsEnabled() {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) setupProfiling(ctx context.Context) (stop func()) {
@@ -402,6 +511,34 @@ func (s *Server) newCA(metrics telemetry.Metrics, credBuilder *credtemplate.Buil
 	})
 }
 
+func (s *Server) newX509SVIDIssuer(ctx context.Context, cat catalog.Catalog, healthChecker health.Checker, owner externalstate.Owner) (*x509svidissuer.Host, error) {
+	plugin, ok := cat.GetX509SVIDIssuer()
+	if !ok {
+		return nil, errors.New("configured X509SVIDIssuer was not loaded")
+	}
+	if _, ok := cat.GetUpstreamAuthority(); ok {
+		return nil, errors.New("X509SVIDIssuer and UpstreamAuthority cannot be configured together")
+	}
+	var host *x509svidissuer.Host
+	host = x509svidissuer.NewHost(x509svidissuer.HostConfig{
+		Plugin: plugin,
+		PublishAuthorities: x509svidissuer.NewAuthorizedBundlePublisher(cat.GetDataStore(), s.config.TrustDomain.IDString(), owner.RetainedRoots(), func(raw []byte) bool {
+			return host.AuthorizesRoot(raw)
+		}),
+		StateDir: owner.StateDir(), Binding: owner.Binding(), Fresh: owner.IsFresh(),
+		WriteState:    owner.WriteJSON,
+		SelectVersion: owner.ActivationVersion,
+		OnError: func(err error) {
+			s.config.Log.WithError(err).Error("External X509-SVID issuer authority session failed")
+		},
+		HealthChecker: healthChecker,
+	})
+	if err := host.Initialize(ctx); err != nil {
+		return nil, err
+	}
+	return host, nil
+}
+
 func (s *Server) newCAManager(ctx context.Context, cat catalog.Catalog, metrics telemetry.Metrics, serverCA *ca.CA, credBuilder *credtemplate.Builder, credValidator *credvalidator.Validator) (*manager.Manager, error) {
 	caManager, err := manager.NewManager(ctx, manager.Config{
 		CA:              serverCA,
@@ -459,7 +596,7 @@ func (s *Server) newNodeManager(cat catalog.Catalog, metrics telemetry.Metrics) 
 	return nodeManager
 }
 
-func (s *Server) newSVIDRotator(ctx context.Context, serverCA ca.ServerCA, metrics telemetry.Metrics) (*svid.Rotator, error) {
+func (s *Server) newSVIDRotator(ctx context.Context, serverCA credentialissuer.Issuer, metrics telemetry.Metrics) (*svid.Rotator, error) {
 	svidRotator := svid.NewRotator(&svid.RotatorConfig{
 		ServerCA: serverCA,
 		Log:      s.config.Log.WithField(telemetry.SubsystemName, telemetry.SVIDRotator),
@@ -472,7 +609,8 @@ func (s *Server) newSVIDRotator(ctx context.Context, serverCA ca.ServerCA, metri
 	return svidRotator, nil
 }
 
-func (s *Server) newEndpointsServer(ctx context.Context, catalog catalog.Catalog, svidObserver svid.Observer, serverCA ca.ServerCA, metrics telemetry.Metrics, authorityManager manager.AuthorityManager, authPolicyEngine *authpolicy.Engine, bundleManager *bundle_client.Manager) (endpoints.Server, error) {
+func (s *Server) newEndpointsServer(ctx context.Context, catalog catalog.Catalog, svidObserver svid.Observer, serverCA credentialissuer.Issuer, metrics telemetry.Metrics, authorityManager credentialissuer.AuthorityAdmin, authPolicyEngine *authpolicy.Engine, bundleManager *bundle_client.Manager) (endpoints.Server, error) {
+	tokenPublisher, _ := authorityManager.(credentialissuer.TokenPublisher)
 	config := endpoints.Config{
 		TCPAddr:                      s.config.BindAddress,
 		LocalAddr:                    s.config.BindLocalAddress,
@@ -484,6 +622,8 @@ func (s *Server) newEndpointsServer(ctx context.Context, catalog catalog.Catalog
 		RootLog:                      s.config.Log,
 		Metrics:                      metrics,
 		AuthorityManager:             authorityManager,
+		TokenPublisher:               tokenPublisher,
+		ExternalX509:                 hasExternalIssuer(s.config.PluginConfigs),
 		RateLimit:                    s.config.RateLimit,
 		Uptime:                       uptime.Uptime,
 		Clock:                        clock.New(),

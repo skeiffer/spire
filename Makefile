@@ -174,7 +174,7 @@ protoc_gen_go_grpc_base_dir := $(build_dir)/protoc-gen-go-grpc
 protoc_gen_go_grpc_dir := $(protoc_gen_go_grpc_base_dir)/$(protoc_gen_go_grpc_version)-go$(go_version)
 protoc_gen_go_grpc_bin := $(protoc_gen_go_grpc_dir)/protoc-gen-go-grpc
 
-protoc_gen_go_spire_version := $(shell grep github.com/spiffe/spire-plugin-sdk go.mod | awk '{print $$2}')
+protoc_gen_go_spire_version := $(shell awk '$$1 == "github.com/spiffe/spire-plugin-sdk" && $$2 ~ /^v/ { v = $$2 } $$1 == "replace" && $$2 == "github.com/spiffe/spire-plugin-sdk" { v = $$5 } END { print v }' go.mod)
 protoc_gen_go_spire_base_dir := $(build_dir)/protoc-gen-go-spire
 protoc_gen_go_spire_dir := $(protoc_gen_go_spire_base_dir)/$(protoc_gen_go_spire_version)-go$(go_version)
 protoc_gen_go_spire_bin := $(protoc_gen_go_spire_dir)/protoc-gen-go-spire
@@ -552,4 +552,4 @@ $(protoc_gen_go_spire_bin): | go-check
 	@echo "Installing protoc-gen-go-spire $(protoc_gen_go_spire_version)..."
 	$(E)rm -rf $(protoc_gen_go_spire_base_dir)
 	$(E)mkdir -p $(protoc_gen_go_spire_dir)
-	$(E)GOBIN=$(protoc_gen_go_spire_dir) $(go_path) go install github.com/spiffe/spire-plugin-sdk/cmd/protoc-gen-go-spire@$(protoc_gen_go_spire_version)
+	$(E)GOBIN=$(protoc_gen_go_spire_dir) $(go_path) go install github.com/spiffe/spire-plugin-sdk/cmd/protoc-gen-go-spire

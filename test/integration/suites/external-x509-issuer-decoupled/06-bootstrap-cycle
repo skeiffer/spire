@@ -1,0 +1,18 @@
+#!/bin/bash
+
+source "${RUNDIR}/_common"
+docker-stop server2
+fixture control -version v2 -bootstrap-dependent
+docker compose start server2
+exited() {
+    container=$(docker compose ps -a -q server2)
+    [ "$(docker inspect --format '{{.State.Status}}' "${container}")" = exited ]
+}
+wait-success exited
+logs=$(docker compose logs server2)
+grep -q "timed out waiting for selected external authority" <<<"${logs}"
+fixture control -version v2
+docker compose up -d server2
+wait-success mint-leaf server2
+fixture check -instance server2
+fixture verify-tokens

@@ -27,10 +27,9 @@ import (
 	trustdomainv1 "github.com/spiffe/spire/pkg/server/api/trustdomain/v1"
 	"github.com/spiffe/spire/pkg/server/authpolicy"
 	bundle_client "github.com/spiffe/spire/pkg/server/bundle/client"
-	"github.com/spiffe/spire/pkg/server/ca"
-	"github.com/spiffe/spire/pkg/server/ca/manager"
 	"github.com/spiffe/spire/pkg/server/cache/dscache"
 	"github.com/spiffe/spire/pkg/server/catalog"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 	"github.com/spiffe/spire/pkg/server/endpoints/bundle"
 	"github.com/spiffe/spire/pkg/server/svid"
 )
@@ -53,13 +52,15 @@ type Config struct {
 	Catalog catalog.Catalog
 
 	// Server CA for signing SVIDs
-	ServerCA ca.ServerCA
+	ServerCA credentialissuer.Issuer
 
 	// Bundle endpoint configuration
 	BundleEndpoint bundle.EndpointConfig
 
 	// Authority manager
-	AuthorityManager manager.AuthorityManager
+	AuthorityManager credentialissuer.AuthorityAdmin
+	TokenPublisher   credentialissuer.TokenPublisher
+	ExternalX509     bool
 
 	// Makes policy decisions
 	AuthPolicyEngine *authpolicy.Engine
@@ -183,7 +184,7 @@ func (c *Config) makeAPIServers(entryFetcher api.AuthorizedEntryFetcher) APIServ
 		BundleServer: bundlev1.New(bundlev1.Config{
 			TrustDomain:       c.TrustDomain,
 			DataStore:         ds,
-			UpstreamPublisher: c.AuthorityManager,
+			UpstreamPublisher: c.TokenPublisher,
 		}),
 		DebugServer: debugv1.New(debugv1.Config{
 			TrustDomain:  c.TrustDomain,
@@ -216,9 +217,10 @@ func (c *Config) makeAPIServers(entryFetcher api.AuthorizedEntryFetcher) APIServ
 			BundleRefresher: c.BundleManager,
 		}),
 		LocalAUthorityServer: localauthorityv1.New(localauthorityv1.Config{
-			TrustDomain: c.TrustDomain,
-			CAManager:   c.AuthorityManager,
-			DataStore:   ds,
+			TrustDomain:  c.TrustDomain,
+			CAManager:    c.AuthorityManager,
+			ExternalX509: c.ExternalX509,
+			DataStore:    ds,
 		}),
 	}
 }

@@ -22,8 +22,8 @@ import (
 	"github.com/spiffe/spire/pkg/common/x509util"
 	"github.com/spiffe/spire/pkg/server/api"
 	"github.com/spiffe/spire/pkg/server/api/rpccontext"
-	"github.com/spiffe/spire/pkg/server/ca"
 	"github.com/spiffe/spire/pkg/server/catalog"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 	"github.com/spiffe/spire/pkg/server/datastore"
 	"github.com/spiffe/spire/pkg/server/plugin/nodeattestor"
 	"github.com/spiffe/spire/proto/spire/common"
@@ -39,7 +39,7 @@ type Config struct {
 	Catalog                    catalog.Catalog
 	Clock                      clock.Clock
 	DataStore                  datastore.DataStore
-	ServerCA                   ca.ServerCA
+	ServerCA                   credentialissuer.Issuer
 	TrustDomain                spiffeid.TrustDomain
 	AgentSpiffeIdAsSelector    bool
 	AllowNonconformingAgentIDs bool
@@ -52,7 +52,7 @@ type Service struct {
 	cat                        catalog.Catalog
 	clk                        clock.Clock
 	ds                         datastore.DataStore
-	ca                         ca.ServerCA
+	ca                         credentialissuer.Issuer
 	td                         spiffeid.TrustDomain
 	AgentSpiffeIdAsSelector    bool
 	allowNonconformingAgentIDs bool
@@ -631,9 +631,10 @@ func (s *Service) signSvid(ctx context.Context, agentID spiffeid.ID, csr []byte,
 	}
 
 	// Sign a new X509 SVID
-	x509Svid, err := s.ca.SignAgentX509SVID(ctx, ca.AgentX509SVIDParams{
+	x509Svid, err := s.ca.SignAgentX509SVID(ctx, credentialissuer.AgentX509SVIDParams{
 		SPIFFEID:  agentID,
 		PublicKey: parsedCsr.PublicKey,
+		ProofCSR:  append([]byte(nil), csr...),
 	})
 	if err != nil {
 		return nil, commonapi.MakeErr(log, codes.Internal, "failed to sign X509 SVID", err)

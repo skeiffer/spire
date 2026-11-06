@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"sync"
@@ -21,6 +20,7 @@ import (
 	"github.com/spiffe/spire/pkg/common/telemetry"
 	telemetry_server "github.com/spiffe/spire/pkg/common/telemetry/server"
 	"github.com/spiffe/spire/pkg/common/x509util"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 	"github.com/spiffe/spire/pkg/server/credtemplate"
 	"github.com/spiffe/spire/pkg/server/credvalidator"
 )
@@ -30,92 +30,25 @@ const (
 )
 
 // ServerCA is an interface for Server CAs
-type ServerCA interface {
-	SignDownstreamX509CA(ctx context.Context, params DownstreamX509CAParams) ([]*x509.Certificate, error)
-	SignServerX509SVID(ctx context.Context, params ServerX509SVIDParams) ([]*x509.Certificate, error)
-	SignAgentX509SVID(ctx context.Context, params AgentX509SVIDParams) ([]*x509.Certificate, error)
-	SignWorkloadX509SVID(ctx context.Context, params WorkloadX509SVIDParams) ([]*x509.Certificate, error)
-	SignWorkloadJWTSVID(ctx context.Context, params WorkloadJWTSVIDParams) (string, error)
-	SignWorkloadWITSVID(ctx context.Context, params WorkloadWITSVIDParams) (string, error)
-	TaintedAuthorities() <-chan []*x509.Certificate
-	IsJWTSVIDsDisabled() bool
-	IsWITSVIDsDisabled() bool
-}
+type ServerCA = credentialissuer.Issuer
 
 // DownstreamX509CAParams are parameters relevant to downstream X.509 CA creation
-type DownstreamX509CAParams struct {
-	// Public Key
-	PublicKey crypto.PublicKey
-
-	// TTL is the desired time-to-live of the SVID. Regardless of the TTL, the
-	// lifetime of the certificate will be capped to that of the signing cert.
-	TTL time.Duration
-}
+type DownstreamX509CAParams = credentialissuer.DownstreamX509CAParams
 
 // ServerX509SVIDParams are parameters relevant to server X509-SVID creation
-type ServerX509SVIDParams struct {
-	// Public Key
-	PublicKey crypto.PublicKey
-}
+type ServerX509SVIDParams = credentialissuer.ServerX509SVIDParams
 
 // AgentX509SVIDParams are parameters relevant to agent X509-SVID creation
-type AgentX509SVIDParams struct {
-	// Public Key
-	PublicKey crypto.PublicKey
-
-	// SPIFFE ID of the agent
-	SPIFFEID spiffeid.ID
-}
+type AgentX509SVIDParams = credentialissuer.AgentX509SVIDParams
 
 // WorkloadX509SVIDParams are parameters relevant to workload X509-SVID creation
-type WorkloadX509SVIDParams struct {
-	// Public Key
-	PublicKey crypto.PublicKey
-
-	// SPIFFE ID of the SVID
-	SPIFFEID spiffeid.ID
-
-	// DNSNames is used to add DNS SAN's to the X509 SVID. The first entry
-	// is also added as the CN.
-	DNSNames []string
-
-	// TTL is the desired time-to-live of the SVID. Regardless of the TTL, the
-	// lifetime of the certificate will be capped to that of the signing cert.
-	TTL time.Duration
-
-	// Subject of the SVID. Default subject is used if it is empty.
-	Subject pkix.Name
-}
+type WorkloadX509SVIDParams = credentialissuer.WorkloadX509SVIDParams
 
 // WorkloadJWTSVIDParams are parameters relevant to workload JWT-SVID creation
-type WorkloadJWTSVIDParams struct {
-	// SPIFFE ID of the SVID
-	SPIFFEID spiffeid.ID
-
-	// TTL is the desired time-to-live of the SVID. Regardless of the TTL, the
-	// lifetime of the token will be capped to that of the signing key.
-	TTL time.Duration
-
-	// Audience is used for audience claims
-	Audience []string
-
-	// IncludeJTI, when true, instructs the CA to include a unique "jti" (JWT ID)
-	// claim in the issued token.
-	IncludeJTI bool
-}
+type WorkloadJWTSVIDParams = credentialissuer.WorkloadJWTSVIDParams
 
 // WorkloadWITSVIDParams are parameters relevant to workload WIT-SVID creation
-type WorkloadWITSVIDParams struct {
-	// SPIFFE ID of the SVID
-	SPIFFEID spiffeid.ID
-
-	// TTL is the desired time-to-live of the SVID. Regardless of the TTL, the
-	// lifetime of the token will be capped to that of the signing key.
-	TTL time.Duration
-
-	// PublicKey is used for the cnf claim
-	PublicKey jose.JSONWebKey
-}
+type WorkloadWITSVIDParams = credentialissuer.WorkloadWITSVIDParams
 
 type X509CA struct {
 	// Signer is used to sign child certificates.

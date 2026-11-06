@@ -1,0 +1,18 @@
+#!/bin/bash
+
+source "${RUNDIR}/_common"
+before=$(docker compose exec -T agent1 cat /test/output/agent1/svid.0.pem | sha256sum)
+docker compose restart server1 server2
+wait-success mint-leaf server1
+wait-success mint-leaf server2
+fixture verify-tokens
+wait-success fixture verify-oidc
+fixture check -instance server1
+fixture check -instance server2
+renewed() {
+    fetch-agent agent1 >/dev/null
+    after=$(docker compose exec -T agent1 cat /test/output/agent1/svid.0.pem | sha256sum)
+    [ "${after}" != "${before}" ]
+}
+wait-success renewed
+wait-success fetch-agent agent2

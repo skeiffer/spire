@@ -7,7 +7,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/spire/pkg/common/observer"
 	"github.com/spiffe/spire/pkg/common/telemetry"
-	"github.com/spiffe/spire/pkg/server/ca"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 	"github.com/spiffe/spire/pkg/server/plugin/keymanager"
 )
 
@@ -18,7 +18,7 @@ const (
 type RotatorConfig struct {
 	Log      logrus.FieldLogger
 	Metrics  telemetry.Metrics
-	ServerCA ca.ServerCA
+	ServerCA credentialissuer.Issuer
 	Clock    clock.Clock
 	KeyType  keymanager.KeyType
 

@@ -6,6 +6,14 @@ The following metrics are emitted:
 
 ## SPIRE Server
 
+With the fork's external X.509 issuer backend, leaf signing and token preparation
+reuse the existing aggregate signing and JWT preparation counters; the `ca`
+metric namespace does not imply construction of an internal X.509 CA. External
+authority versions and provider error strings are not metric labels. The
+`server.x509svidissuer` health check reports leaf readiness separately from the
+`server.tokens` check; an observed issuer stream failure does not disable healthy
+independent token authorities.
+
 | Type         | Keys                                              | Labels                       | Description                                                                                                                                                                                                                              |
 |--------------|---------------------------------------------------|------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Call Counter | `rpc`, `<service>`, `<method>`                    |                              | Call counters over the [SPIRE Server RPCs](https://github.com/spiffe/spire-api-sdk).                                                                                                                                                     |

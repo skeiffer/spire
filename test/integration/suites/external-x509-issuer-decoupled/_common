@@ -1,0 +1,48 @@
+#!/bin/bash
+
+fixture() {
+    docker compose exec -T server1 /opt/spire/bin/x509svidissuer-fixture "$@"
+}
+
+server() {
+    local service=$1
+    shift
+    docker compose exec -T "${service}" /opt/spire/bin/spire-server "$@" \
+        -socketPath "/test/run/${service}/api.sock"
+}
+
+wait-success() {
+    for ((attempt=0; attempt<60; attempt++)); do
+        if "$@"; then
+            return 0
+        fi
+        sleep 1
+    done
+    fail-now "timed out waiting for $*"
+}
+
+wait-failure() {
+    for ((attempt=0; attempt<60; attempt++)); do
+        if ! "$@" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+    fail-now "expected operation to fail closed"
+}
+
+mint-leaf() {
+    server "$1" x509 mint \
+        -spiffeID spiffe://domain.test/mint-check -ttl 30s >/dev/null
+}
+
+fetch-agent() {
+    docker compose exec -T server1 mkdir -p "/test/output/$1"
+    docker compose exec -T "$1" /opt/spire/bin/spire-agent api fetch x509 \
+        -write "/test/output/$1"
+}
+
+check-propagation() {
+    fetch-agent "$1" >/dev/null &&
+        fixture check-bundle -bundle "/test/output/$1/bundle.0.pem"
+}

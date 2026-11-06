@@ -77,6 +77,7 @@ type serverConfig struct {
 	CASubject                    *caSubjectConfig     `hcl:"ca_subject"`
 	CATTL                        string               `hcl:"ca_ttl"`
 	DataDir                      string               `hcl:"data_dir"`
+	ExternalX509ControlDir       string               `hcl:"external_x509_control_dir"`
 	DefaultX509SVIDTTL           string               `hcl:"default_x509_svid_ttl"`
 	DefaultJWTSVIDTTL            string               `hcl:"default_jwt_svid_ttl"`
 	Experimental                 experimentalConfig   `hcl:"experimental"`
@@ -454,6 +455,7 @@ func newServerConfig(c *Config, logOptions []log.Option, allowUnknownConfig, ski
 	sc.BindLocalAddress = addr
 
 	sc.DataDir = c.Server.DataDir
+	sc.ExternalX509ControlDir = c.Server.ExternalX509ControlDir
 	sc.AuditLogEnabled = c.Server.AuditLogEnabled
 	sc.AuditLogExcludeAgentSync = c.Server.AuditLogExcludeAgentSync
 	sc.ProxyProtocolTrustedCIDRs = c.Server.ProxyProtocolTrustedCIDRs

@@ -1,0 +1,22 @@
+#!/bin/bash
+
+source "${RUNDIR}/_common"
+fixture control -version v2
+wait-success check-propagation agent1
+wait-success check-propagation agent2
+wait-success check-propagation agent-old
+fixture activate -instance server1 -version v2
+fixture activate -instance server2 -version v2
+wait-success mint-leaf server1
+wait-success mint-leaf server2
+fixture verify-tokens
+fixture check -instance server1
+fixture check -instance server2
+fixture rotate-jwt &
+first=$!
+docker compose exec -T server2 /opt/spire/bin/x509svidissuer-fixture rotate-jwt &
+second=$!
+wait "${first}"
+wait "${second}"
+wait-success fixture verify-oidc
+fixture verify-tokens

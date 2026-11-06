@@ -29,9 +29,9 @@ import (
 	"github.com/spiffe/spire/pkg/common/tlspolicy"
 	"github.com/spiffe/spire/pkg/common/util"
 	"github.com/spiffe/spire/pkg/server/authpolicy"
-	"github.com/spiffe/spire/pkg/server/ca/manager"
 	"github.com/spiffe/spire/pkg/server/cache/entrycache"
 	"github.com/spiffe/spire/pkg/server/cache/nodecache"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 	"github.com/spiffe/spire/pkg/server/datastore"
 	"github.com/spiffe/spire/pkg/server/endpoints/bundle"
 	"github.com/spiffe/spire/pkg/server/svid"
@@ -1250,7 +1250,7 @@ func (o *svidObserver) State() svid.State {
 }
 
 type fakeAuthorityManager struct {
-	manager.AuthorityManager
+	credentialissuer.AuthorityAdmin
 }
 
 type agentServer struct {

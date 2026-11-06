@@ -1,0 +1,17 @@
+#!/bin/bash
+
+source "${RUNDIR}/_common"
+docker-spire-server-up server1
+docker-spire-server-up server2
+docker-up oidc
+wait-success mint-leaf server1
+wait-success mint-leaf server2
+fixture check -instance server1
+fixture check -instance server2
+fixture verify-tokens
+docker compose exec -T server2 /opt/spire/bin/x509svidissuer-fixture verify-tokens
+wait-success fixture verify-oidc
+if output=$(server server1 localauthority x509 show 2>&1); then
+    fail-now "internal X509 authority administration was not rejected"
+fi
+printf '%s' "${output}" | grep -q "X509 authority administration is unavailable with X509SVIDIssuer"

@@ -3,6 +3,7 @@ package svid
 import (
 	"context"
 	"crypto"
+	"crypto/rand"
 	"crypto/x509"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/spiffe/spire/pkg/common/observer"
 	"github.com/spiffe/spire/pkg/common/telemetry"
 	telemetry_server "github.com/spiffe/spire/pkg/common/telemetry/server"
-	"github.com/spiffe/spire/pkg/server/ca"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 )
 
 var (
@@ -133,8 +134,17 @@ func (r *Rotator) rotateSVID(ctx context.Context) (err error) {
 		return err
 	}
 
-	svid, err := r.c.ServerCA.SignServerX509SVID(ctx, ca.ServerX509SVIDParams{
+	var proofCSR []byte
+	if backend, ok := r.c.ServerCA.(interface{ RequiresProofCSR() bool }); ok && backend.RequiresProofCSR() {
+		proofCSR, err = x509.CreateCertificateRequest(rand.Reader, new(x509.CertificateRequest), signer)
+		if err != nil {
+			return err
+		}
+	}
+
+	svid, err := r.c.ServerCA.SignServerX509SVID(ctx, credentialissuer.ServerX509SVIDParams{
 		PublicKey: signer.Public(),
+		ProofCSR:  proofCSR,
 	})
 	if err != nil {
 		return err

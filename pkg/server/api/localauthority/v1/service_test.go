@@ -19,6 +19,7 @@ import (
 	"github.com/spiffe/spire/pkg/server/api/middleware"
 	"github.com/spiffe/spire/pkg/server/api/rpccontext"
 	"github.com/spiffe/spire/pkg/server/ca/manager"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 	"github.com/spiffe/spire/proto/private/server/journal"
 	"github.com/spiffe/spire/proto/spire/common"
 	"github.com/spiffe/spire/test/fakes/fakedatastore"
@@ -2669,11 +2670,11 @@ func (m *fakeCAManager) IsUpstreamAuthority() bool {
 	return m.isUpstreamAuthority
 }
 
-func (m *fakeCAManager) GetCurrentJWTKeySlot() manager.Slot {
+func (m *fakeCAManager) GetCurrentJWTKeySlot() credentialissuer.AuthorityState {
 	return m.currentJWTKeySlot
 }
 
-func (m *fakeCAManager) GetNextJWTKeySlot() manager.Slot {
+func (m *fakeCAManager) GetNextJWTKeySlot() credentialissuer.AuthorityState {
 	return m.nextJWTKeySlot
 }
 
@@ -2681,15 +2682,16 @@ func (m *fakeCAManager) PrepareJWTKey(context.Context) error {
 	return m.prepareJWTKeyErr
 }
 
-func (m *fakeCAManager) RotateJWTKey(context.Context) {
+func (m *fakeCAManager) RotateJWTKey(context.Context) error {
 	m.rotateJWTKeyCalled = true
+	return nil
 }
 
-func (m *fakeCAManager) GetCurrentX509CASlot() manager.Slot {
+func (m *fakeCAManager) GetCurrentX509CASlot() credentialissuer.AuthorityState {
 	return m.currentX509CASlot
 }
 
-func (m *fakeCAManager) GetNextX509CASlot() manager.Slot {
+func (m *fakeCAManager) GetNextX509CASlot() credentialissuer.AuthorityState {
 	return m.nextX509CASlot
 }
 

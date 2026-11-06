@@ -12,30 +12,14 @@ import (
 	commonapi "github.com/spiffe/spire/pkg/common/api"
 	"github.com/spiffe/spire/pkg/common/telemetry"
 	"github.com/spiffe/spire/pkg/server/api/rpccontext"
-	"github.com/spiffe/spire/pkg/server/ca/manager"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 	"github.com/spiffe/spire/pkg/server/datastore"
 	"github.com/spiffe/spire/proto/private/server/journal"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 )
 
-type CAManager interface {
-	// JWT
-	GetCurrentJWTKeySlot() manager.Slot
-	GetNextJWTKeySlot() manager.Slot
-	PrepareJWTKey(ctx context.Context) error
-	RotateJWTKey(ctx context.Context)
-	IsJWTSVIDsDisabled() bool
-
-	// X509
-	GetCurrentX509CASlot() manager.Slot
-	GetNextX509CASlot() manager.Slot
-	PrepareX509CA(ctx context.Context) error
-	RotateX509CA(ctx context.Context) error
-
-	IsUpstreamAuthority() bool
-	NotifyTaintedX509Authority(ctx context.Context, authorityID string) error
-}
+type CAManager = credentialissuer.AuthorityAdmin
 
 // RegisterService registers the service on the gRPC server.
 func RegisterService(s grpc.ServiceRegistrar, service *Service) {
@@ -44,17 +28,19 @@ func RegisterService(s grpc.ServiceRegistrar, service *Service) {
 
 // Config is the service configuration
 type Config struct {
-	TrustDomain spiffeid.TrustDomain
-	DataStore   datastore.DataStore
-	CAManager   CAManager
+	TrustDomain  spiffeid.TrustDomain
+	DataStore    datastore.DataStore
+	CAManager    CAManager
+	ExternalX509 bool
 }
 
 // New creates a new LocalAuthority service
 func New(config Config) *Service {
 	return &Service{
-		td: config.TrustDomain,
-		ds: config.DataStore,
-		ca: config.CAManager,
+		td:           config.TrustDomain,
+		ds:           config.DataStore,
+		ca:           config.CAManager,
+		externalX509: config.ExternalX509,
 	}
 }
 
@@ -62,9 +48,10 @@ func New(config Config) *Service {
 type Service struct {
 	localauthorityv1.UnsafeLocalAuthorityServer
 
-	td spiffeid.TrustDomain
-	ds datastore.DataStore
-	ca CAManager
+	td           spiffeid.TrustDomain
+	ds           datastore.DataStore
+	ca           CAManager
+	externalX509 bool
 }
 
 func (s *Service) GetJWTAuthorityState(ctx context.Context, _ *localauthorityv1.GetJWTAuthorityStateRequest) (*localauthorityv1.GetJWTAuthorityStateResponse, error) {
@@ -159,7 +146,9 @@ func (s *Service) ActivateJWTAuthority(ctx context.Context, req *localauthorityv
 		return nil, commonapi.MakeErr(log, codes.Internal, "only Prepared authorities can be activated", fmt.Errorf("unsupported local authority status: %v", nextSlot.Status()))
 	}
 
-	s.ca.RotateJWTKey(ctx)
+	if err := s.ca.RotateJWTKey(ctx); err != nil {
+		return nil, commonapi.MakeErr(log, codes.Internal, "failed to activate JWT authority", err)
+	}
 
 	current := s.ca.GetCurrentJWTKeySlot()
 	state := &localauthorityv1.AuthorityState{
@@ -255,6 +244,9 @@ func (s *Service) RevokeJWTAuthority(ctx context.Context, req *localauthorityv1.
 }
 
 func (s *Service) GetX509AuthorityState(ctx context.Context, _ *localauthorityv1.GetX509AuthorityStateRequest) (*localauthorityv1.GetX509AuthorityStateResponse, error) {
+	if s.externalX509 {
+		return nil, commonapi.MakeErr(rpccontext.Logger(ctx), codes.Unimplemented, "X509 authority administration is unavailable with X509SVIDIssuer", nil)
+	}
 	log := rpccontext.Logger(ctx)
 
 	current := s.ca.GetCurrentX509CASlot()
@@ -288,6 +280,9 @@ func (s *Service) GetX509AuthorityState(ctx context.Context, _ *localauthorityv1
 }
 
 func (s *Service) PrepareX509Authority(ctx context.Context, _ *localauthorityv1.PrepareX509AuthorityRequest) (*localauthorityv1.PrepareX509AuthorityResponse, error) {
+	if s.externalX509 {
+		return nil, commonapi.MakeErr(rpccontext.Logger(ctx), codes.Unimplemented, "X509 authority administration is unavailable with X509SVIDIssuer", nil)
+	}
 	log := rpccontext.Logger(ctx)
 
 	current := s.ca.GetCurrentX509CASlot()
@@ -313,6 +308,9 @@ func (s *Service) PrepareX509Authority(ctx context.Context, _ *localauthorityv1.
 }
 
 func (s *Service) ActivateX509Authority(ctx context.Context, req *localauthorityv1.ActivateX509AuthorityRequest) (*localauthorityv1.ActivateX509AuthorityResponse, error) {
+	if s.externalX509 {
+		return nil, commonapi.MakeErr(rpccontext.Logger(ctx), codes.Unimplemented, "X509 authority administration is unavailable with X509SVIDIssuer", nil)
+	}
 	rpccontext.AddRPCAuditFields(ctx, buildAuditLogFields(req.AuthorityId))
 	log := rpccontext.Logger(ctx)
 	if req.AuthorityId != "" {
@@ -354,6 +352,9 @@ func (s *Service) ActivateX509Authority(ctx context.Context, req *localauthority
 }
 
 func (s *Service) TaintX509Authority(ctx context.Context, req *localauthorityv1.TaintX509AuthorityRequest) (*localauthorityv1.TaintX509AuthorityResponse, error) {
+	if s.externalX509 {
+		return nil, commonapi.MakeErr(rpccontext.Logger(ctx), codes.Unimplemented, "X509 authority administration is unavailable with X509SVIDIssuer", nil)
+	}
 	rpccontext.AddRPCAuditFields(ctx, buildAuditLogFields(req.AuthorityId))
 	log := rpccontext.Logger(ctx)
 	if req.AuthorityId != "" {
@@ -407,6 +408,9 @@ func (s *Service) TaintX509Authority(ctx context.Context, req *localauthorityv1.
 }
 
 func (s *Service) TaintX509UpstreamAuthority(ctx context.Context, req *localauthorityv1.TaintX509UpstreamAuthorityRequest) (*localauthorityv1.TaintX509UpstreamAuthorityResponse, error) {
+	if s.externalX509 {
+		return nil, commonapi.MakeErr(rpccontext.Logger(ctx), codes.Unimplemented, "X509 authority administration is unavailable with X509SVIDIssuer", nil)
+	}
 	rpccontext.AddRPCAuditFields(ctx, buildAuditUpstreamLogFields(req.SubjectKeyId))
 	log := rpccontext.Logger(ctx)
 
@@ -442,6 +446,9 @@ func (s *Service) TaintX509UpstreamAuthority(ctx context.Context, req *localauth
 }
 
 func (s *Service) RevokeX509Authority(ctx context.Context, req *localauthorityv1.RevokeX509AuthorityRequest) (*localauthorityv1.RevokeX509AuthorityResponse, error) {
+	if s.externalX509 {
+		return nil, commonapi.MakeErr(rpccontext.Logger(ctx), codes.Unimplemented, "X509 authority administration is unavailable with X509SVIDIssuer", nil)
+	}
 	rpccontext.AddRPCAuditFields(ctx, buildAuditLogFields(req.AuthorityId))
 	log := rpccontext.Logger(ctx)
 
@@ -475,6 +482,9 @@ func (s *Service) RevokeX509Authority(ctx context.Context, req *localauthorityv1
 }
 
 func (s *Service) RevokeX509UpstreamAuthority(ctx context.Context, req *localauthorityv1.RevokeX509UpstreamAuthorityRequest) (*localauthorityv1.RevokeX509UpstreamAuthorityResponse, error) {
+	if s.externalX509 {
+		return nil, commonapi.MakeErr(rpccontext.Logger(ctx), codes.Unimplemented, "X509 authority administration is unavailable with X509SVIDIssuer", nil)
+	}
 	rpccontext.AddRPCAuditFields(ctx, buildAuditUpstreamLogFields(req.SubjectKeyId))
 	log := rpccontext.Logger(ctx)
 
@@ -623,7 +633,7 @@ func buildAuditUpstreamLogFields(authorityID string) logrus.Fields {
 	return fields
 }
 
-func stateFromSlot(s manager.Slot) *localauthorityv1.AuthorityState {
+func stateFromSlot(s credentialissuer.AuthorityState) *localauthorityv1.AuthorityState {
 	return &localauthorityv1.AuthorityState{
 		AuthorityId:                   s.AuthorityID(),
 		ExpiresAt:                     s.NotAfter().Unix(),

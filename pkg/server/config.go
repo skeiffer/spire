@@ -49,6 +49,9 @@ type Config struct {
 	// Directory to store runtime data
 	DataDir string
 
+	// ExternalX509ControlDir contains independently provisioned ownership and activation assertions.
+	ExternalX509ControlDir string
+
 	// Trust domain
 	TrustDomain spiffeid.TrustDomain
 

@@ -24,7 +24,7 @@ import (
 	"github.com/spiffe/spire/pkg/common/x509util"
 	"github.com/spiffe/spire/pkg/server/api"
 	"github.com/spiffe/spire/pkg/server/api/rpccontext"
-	"github.com/spiffe/spire/pkg/server/ca"
+	"github.com/spiffe/spire/pkg/server/credentialissuer"
 	"github.com/spiffe/spire/pkg/server/datastore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -43,7 +43,7 @@ func RegisterService(s grpc.ServiceRegistrar, service *Service) {
 // Config is the service configuration
 type Config struct {
 	EntryFetcher api.AuthorizedEntryFetcher
-	ServerCA     ca.ServerCA
+	ServerCA     credentialissuer.Issuer
 	TrustDomain  spiffeid.TrustDomain
 	DataStore    datastore.DataStore
 }
@@ -62,7 +62,7 @@ func New(config Config) *Service {
 type Service struct {
 	svidv1.UnsafeSVIDServer
 
-	ca                           ca.ServerCA
+	ca                           credentialissuer.Issuer
 	ef                           api.AuthorizedEntryFetcher
 	td                           spiffeid.TrustDomain
 	ds                           datastore.DataStore
@@ -118,12 +118,13 @@ func (s *Service) MintX509SVID(ctx context.Context, req *svidv1.MintX509SVIDRequ
 		return nil, commonapi.MakeErr(log, codes.InvalidArgument, "CSR DNS name contains a wildcard that covers another non-wildcard name", err)
 	}
 
-	x509SVID, err := s.ca.SignWorkloadX509SVID(ctx, ca.WorkloadX509SVIDParams{
+	x509SVID, err := s.ca.SignWorkloadX509SVID(ctx, credentialissuer.WorkloadX509SVIDParams{
 		SPIFFEID:  id,
 		PublicKey: csr.PublicKey,
 		TTL:       time.Duration(req.Ttl) * time.Second,
 		DNSNames:  dnsNames,
 		Subject:   csr.Subject,
+		ProofCSR:  append([]byte(nil), req.Csr...),
 	})
 	if err != nil {
 		return nil, commonapi.MakeErr(log, codes.Internal, "failed to sign X509-SVID", err)
@@ -302,11 +303,12 @@ func (s *Service) newX509SVID(ctx context.Context, param *svidv1.NewX509SVIDPara
 	}
 	log = log.WithField(telemetry.SPIFFEID, spiffeID.String())
 
-	x509Svid, err := s.ca.SignWorkloadX509SVID(ctx, ca.WorkloadX509SVIDParams{
+	x509Svid, err := s.ca.SignWorkloadX509SVID(ctx, credentialissuer.WorkloadX509SVIDParams{
 		SPIFFEID:  spiffeID,
 		PublicKey: csr.PublicKey,
 		DNSNames:  entry.GetDnsNames(),
 		TTL:       time.Duration(entry.GetX509SvidTtl()) * time.Second,
+		ProofCSR:  append([]byte(nil), param.Csr...),
 	})
 	if err != nil {
 		return &svidv1.BatchNewX509SVIDResponse_Result{
@@ -346,7 +348,7 @@ func (s *Service) mintJWTSVID(ctx context.Context, protoID *types.SPIFFEID, audi
 		return nil, commonapi.MakeErr(log, codes.InvalidArgument, "at least one audience is required", nil)
 	}
 
-	token, err := s.ca.SignWorkloadJWTSVID(ctx, ca.WorkloadJWTSVIDParams{
+	token, err := s.ca.SignWorkloadJWTSVID(ctx, credentialissuer.WorkloadJWTSVIDParams{
 		SPIFFEID:   id,
 		TTL:        time.Duration(ttl) * time.Second,
 		Audience:   audience,
@@ -495,7 +497,7 @@ func (s *Service) mintWITSVID(ctx context.Context, protoID *types.SPIFFEID, publ
 		return nil, commonapi.MakeErr(log, codes.InvalidArgument, "invalid signing algorithm or key type", err)
 	}
 
-	token, err := s.ca.SignWorkloadWITSVID(ctx, ca.WorkloadWITSVIDParams{
+	token, err := s.ca.SignWorkloadWITSVID(ctx, credentialissuer.WorkloadWITSVIDParams{
 		SPIFFEID: id,
 		TTL:      time.Duration(ttl) * time.Second,
 		PublicKey: jose.JSONWebKey{
@@ -571,7 +573,7 @@ func (s *Service) newWITSVID(ctx context.Context, param *svidv1.NewWITSVIDParams
 
 	log = log.WithField(telemetry.SPIFFEID, spiffeID.String())
 
-	witSvid, err := s.ca.SignWorkloadWITSVID(ctx, ca.WorkloadWITSVIDParams{
+	witSvid, err := s.ca.SignWorkloadWITSVID(ctx, credentialissuer.WorkloadWITSVIDParams{
 		SPIFFEID: spiffeID,
 		PublicKey: jose.JSONWebKey{
 			Algorithm: param.SigningAlgorithm,
@@ -618,6 +620,9 @@ func (s *Service) NewDownstreamX509CA(ctx context.Context, req *svidv1.NewDownst
 	if !isDownstream {
 		return nil, commonapi.MakeErr(log, codes.Internal, "caller is not a downstream workload", nil)
 	}
+	if backend, ok := s.ca.(interface{ RequiresProofCSR() bool }); ok && backend.RequiresProofCSR() {
+		return nil, commonapi.MakeErr(log, codes.Unimplemented, "downstream X509 CA issuance is unavailable with X509SVIDIssuer", nil)
+	}
 
 	entry := downstreamEntries[0]
 
@@ -637,7 +642,7 @@ func (s *Service) NewDownstreamX509CA(ctx context.Context, req *svidv1.NewDownst
 		ttl = entry.X509SvidTtl
 	}
 
-	x509CASvid, err := s.ca.SignDownstreamX509CA(ctx, ca.DownstreamX509CAParams{
+	x509CASvid, err := s.ca.SignDownstreamX509CA(ctx, credentialissuer.DownstreamX509CAParams{
 		PublicKey: csr.PublicKey,
 		TTL:       time.Duration(ttl) * time.Second,
 	})

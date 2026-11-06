@@ -1,0 +1,35 @@
+services:
+  prepare:
+    image: spire-external-decoupled:latest-local
+    command: ["/opt/spire/bin/x509svidissuer-fixture", "prepare"]
+    volumes: ["external-state:/test"]
+  server1:
+    image: spire-external-decoupled:latest-local
+    command: ["/opt/spire/bin/spire-server", "run", "-config", "/test/conf/server1.conf"]
+    volumes: ["external-state:/test"]
+    environment:
+      FIXTURE_SERVER_INSTANCE: server1
+  server2:
+    image: spire-external-decoupled:latest-local
+    command: ["/opt/spire/bin/spire-server", "run", "-config", "/test/conf/server2.conf"]
+    volumes: ["external-state:/test"]
+    environment:
+      FIXTURE_SERVER_INSTANCE: server2
+  oidc:
+    image: spire-external-decoupled:latest-local
+    command: ["/opt/spire/bin/oidc-discovery-provider", "-config", "/test/conf/oidc.conf"]
+    volumes: ["external-state:/test"]
+  agent1:
+    image: spire-external-decoupled:latest-local
+    command: ["/opt/spire/bin/spire-agent", "run", "-config", "/test/conf/agent1.conf"]
+    volumes: ["external-state:/test"]
+  agent2:
+    image: spire-external-decoupled:latest-local
+    command: ["/opt/spire/bin/spire-agent", "run", "-config", "/test/conf/agent2.conf"]
+    volumes: ["external-state:/test"]
+  agent-old:
+    image: ghcr.io/spiffe/spire-agent:1.15.3
+    command: ["-config", "/test/conf/agent-old.conf"]
+    volumes: ["external-state:/test"]
+volumes:
+  external-state:

@@ -1,0 +1,20 @@
+#!/bin/bash
+
+source "${RUNDIR}/_common"
+for n in 1 2; do
+    token=$(server "server${n}" token generate \
+        -spiffeID "spiffe://domain.test/node${n}" | awk '{print $2}' | tr -d '\r')
+    fixture agent-config -instance "agent${n}" -server "server${n}" -token "${token}"
+    server "server${n}" entry create \
+        -parentID "spiffe://domain.test/node${n}" \
+        -spiffeID "spiffe://domain.test/workload${n}" -selector unix:uid:0 -x509SVIDTTL 30
+done
+docker-up agent1 agent2
+wait-success fetch-agent agent1
+wait-success fetch-agent agent2
+token=$(server server1 token generate -spiffeID spiffe://domain.test/node-old | awk '{print $2}' | tr -d '\r')
+fixture agent-config -instance agent-old -server server1 -token "${token}"
+server server1 entry create -parentID spiffe://domain.test/node-old \
+    -spiffeID spiffe://domain.test/workload-old -selector unix:uid:0 -x509SVIDTTL 30
+docker-up agent-old
+wait-success fetch-agent agent-old
