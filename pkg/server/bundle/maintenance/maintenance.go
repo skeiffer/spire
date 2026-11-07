@@ -3,29 +3,35 @@ package maintenance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/andres-erbsen/clock"
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/spire/pkg/common/telemetry"
+	telemetryserver "github.com/spiffe/spire/pkg/common/telemetry/server"
 	"github.com/spiffe/spire/pkg/server/datastore"
 	"github.com/spiffe/spire/pkg/server/plugin/notifier"
 	"github.com/spiffe/spire/proto/spire/common"
-	"google.golang.org/protobuf/proto"
+)
+
+const (
+	PruneInterval = 6 * time.Hour
+	SafetyMargin  = 24 * time.Hour
 )
 
 type Config struct {
-	DataStore   datastore.DataStore
-	TrustDomain string
-	Notifiers   []notifier.Notifier
-	Log         logrus.FieldLogger
-	Clock       clock.Clock
+	DataStore    datastore.DataStore
+	TrustDomain  string
+	GetNotifiers func() []notifier.Notifier
+	Log          logrus.FieldLogger
+	Clock        clock.Clock
+	Metrics      telemetry.Metrics
 }
 
 type manager struct {
 	c           Config
 	updates     chan struct{}
-	last        *common.Bundle
 	initialized bool
 }
 
@@ -43,24 +49,86 @@ func (m *manager) BundleUpdated() {
 	}
 }
 
+func (m *manager) Updates() <-chan struct{} { return m.updates }
+
 func (m *manager) Initialize(ctx context.Context) error {
-	last, err := m.c.DataStore.FetchBundle(ctx, m.c.TrustDomain)
+	select {
+	case <-m.updates:
+	default:
+	}
+	if err := m.notify(ctx, "bundle loaded", true, func(ctx context.Context, n notifier.Notifier, bundle *common.Bundle) error {
+		return n.NotifyAndAdviseBundleLoaded(ctx, bundle)
+	}); err != nil {
+		return err
+	}
+	m.initialized = true
+	return nil
+}
+
+func (m *manager) NotifyBundleUpdated(ctx context.Context) error {
+	return m.notify(ctx, "bundle updated", false, func(ctx context.Context, n notifier.Notifier, bundle *common.Bundle) error {
+		return n.NotifyBundleUpdated(ctx, bundle)
+	})
+}
+
+func (m *manager) notify(ctx context.Context, event string, advise bool, do func(context.Context, notifier.Notifier, *common.Bundle) error) error {
+	var notifiers []notifier.Notifier
+	if m.c.GetNotifiers != nil {
+		notifiers = m.c.GetNotifiers()
+	}
+	if len(notifiers) == 0 {
+		return nil
+	}
+	bundle, err := m.c.DataStore.FetchBundle(ctx, m.c.TrustDomain)
 	if err != nil {
 		return err
 	}
-	if last == nil {
-		return errors.New("local bundle is unavailable for bundle maintenance")
+	if bundle == nil {
+		return errors.New("trust domain bundle is missing")
 	}
-	for _, plugin := range m.c.Notifiers {
-		if err := plugin.NotifyAndAdviseBundleLoaded(ctx, proto.Clone(last).(*common.Bundle)); err != nil {
-			m.c.Log.WithError(err).WithFields(logrus.Fields{
-				telemetry.Notifier: plugin.Name(),
-				telemetry.Event:    "bundle loaded",
-			}).Error("Notifier failed to handle event")
-			return err
-		}
+	errsCh := make(chan error, len(notifiers))
+	for _, n := range notifiers {
+		go func(n notifier.Notifier) {
+			err := do(ctx, n, bundle)
+			log := m.c.Log.WithFields(logrus.Fields{
+				telemetry.Notifier: n.Name(),
+				telemetry.Event:    event,
+			})
+			if err == nil {
+				log.Debug("Notifier handled event")
+			} else {
+				log = log.WithError(err)
+				if advise {
+					log.Error("Notifier failed to handle event")
+				} else {
+					log.Warn("Notifier failed to handle event")
+				}
+			}
+			errsCh <- err
+		}(n)
 	}
-	m.last, m.initialized = last, true
+	var allErrs error
+	for range notifiers {
+		allErrs = errors.Join(allErrs, <-errsCh)
+	}
+	if allErrs != nil {
+		return fmt.Errorf("one or more notifiers returned an error: %w", allErrs)
+	}
+	return nil
+}
+
+func (m *manager) PruneBundle(ctx context.Context) (err error) {
+	counter := telemetryserver.StartCAManagerPruneBundleCall(m.c.Metrics)
+	defer counter.Done(&err)
+	changed, err := m.c.DataStore.PruneBundle(ctx, m.c.TrustDomain, m.c.Clock.Now().Add(-SafetyMargin))
+	if err != nil {
+		return fmt.Errorf("unable to prune bundle: %w", err)
+	}
+	if changed {
+		telemetryserver.IncrManagerPrunedBundleCounter(m.c.Metrics)
+		m.c.Log.Debug("Expired certificates were successfully pruned from bundle")
+		m.BundleUpdated()
+	}
 	return nil
 }
 
@@ -70,49 +138,20 @@ func (m *manager) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	last := m.last
-	prune := m.c.Clock.Ticker(6 * time.Hour)
-	poll := m.c.Clock.Ticker(5 * time.Second)
+	prune := m.c.Clock.Ticker(PruneInterval)
 	defer prune.Stop()
-	defer poll.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-prune.C:
-			if changed, err := m.c.DataStore.PruneBundle(ctx, m.c.TrustDomain, m.c.Clock.Now().Add(-24*time.Hour)); err != nil {
-				m.c.Log.WithError(err).Warn("Failed to prune expired bundle verification material")
-			} else if changed {
-				m.BundleUpdated()
+			if err := m.PruneBundle(ctx); err != nil {
+				m.c.Log.WithError(err).Error("Could not prune CA certificates")
 			}
-			continue
-		case <-poll.C:
 		case <-m.updates:
-		}
-		bundle, err := m.c.DataStore.FetchBundle(ctx, m.c.TrustDomain)
-		if err != nil {
-			m.c.Log.WithError(err).Warn("Failed to load local bundle for notification")
-			continue
-		}
-		if bundle == nil {
-			m.c.Log.Warn("Local bundle is missing for notification")
-			continue
-		}
-		if proto.Equal(last, bundle) {
-			continue
-		}
-		complete := true
-		for _, plugin := range m.c.Notifiers {
-			if err := plugin.NotifyBundleUpdated(ctx, proto.Clone(bundle).(*common.Bundle)); err != nil {
-				m.c.Log.WithError(err).WithFields(logrus.Fields{
-					telemetry.Notifier: plugin.Name(),
-					telemetry.Event:    "bundle updated",
-				}).Warn("Notifier failed to handle event")
-				complete = false
+			if err := m.NotifyBundleUpdated(ctx); err != nil {
+				m.c.Log.WithError(err).Warn("Failed to notify on bundle update")
 			}
-		}
-		if complete {
-			last = bundle
 		}
 	}
 }

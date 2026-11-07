@@ -19,13 +19,13 @@ import (
 	"github.com/spiffe/spire/pkg/common/telemetry"
 	telemetry_server "github.com/spiffe/spire/pkg/common/telemetry/server"
 	"github.com/spiffe/spire/pkg/common/x509util"
+	"github.com/spiffe/spire/pkg/server/bundle/maintenance"
 	"github.com/spiffe/spire/pkg/server/ca"
 	"github.com/spiffe/spire/pkg/server/catalog"
 	"github.com/spiffe/spire/pkg/server/credtemplate"
 	"github.com/spiffe/spire/pkg/server/credvalidator"
 	"github.com/spiffe/spire/pkg/server/datastore"
 	"github.com/spiffe/spire/pkg/server/plugin/keymanager"
-	"github.com/spiffe/spire/pkg/server/plugin/notifier"
 	"github.com/spiffe/spire/proto/private/server/journal"
 	"github.com/spiffe/spire/proto/spire/common"
 	"google.golang.org/grpc/codes"
@@ -34,7 +34,7 @@ import (
 
 const (
 	publishJWKTimeout         = 5 * time.Second
-	safetyThresholdBundle     = 24 * time.Hour
+	safetyThresholdBundle     = maintenance.SafetyMargin
 	safetyThresholdCAJournals = time.Hour * 24 * 14 // Two weeks
 
 	thirtyDays                  = 30 * 24 * time.Hour
@@ -100,7 +100,7 @@ type Config struct {
 type Manager struct {
 	c                            Config
 	caTTL                        time.Duration
-	bundleUpdatedCh              chan struct{}
+	bundles                      maintenance.Manager
 	taintedUpstreamAuthoritiesCh chan []*x509.Certificate
 	upstreamClient               *ca.UpstreamClient
 	upstreamPluginName           string
@@ -135,9 +135,12 @@ func NewManager(ctx context.Context, c Config) (*Manager, error) {
 	}
 
 	m := &Manager{
-		c:                            c,
-		caTTL:                        c.CredBuilder.Config().X509CATTL,
-		bundleUpdatedCh:              make(chan struct{}, 1),
+		c:     c,
+		caTTL: c.CredBuilder.Config().X509CATTL,
+		bundles: maintenance.New(maintenance.Config{
+			DataStore: c.Catalog.GetDataStore(), TrustDomain: c.TrustDomain.IDString(),
+			GetNotifiers: c.Catalog.GetNotifiers, Log: c.Log, Clock: c.Clock, Metrics: c.Metrics,
+		}),
 		taintedUpstreamAuthoritiesCh: make(chan []*x509.Certificate, 1),
 	}
 
@@ -684,25 +687,8 @@ func (m *Manager) SubscribeToLocalBundle(ctx context.Context) error {
 	}
 }
 
-func (m *Manager) PruneBundle(ctx context.Context) (err error) {
-	counter := telemetry_server.StartCAManagerPruneBundleCall(m.c.Metrics)
-	defer counter.Done(&err)
-
-	ds := m.c.Catalog.GetDataStore()
-	expiresBefore := m.c.Clock.Now().Add(-safetyThresholdBundle)
-
-	changed, err := ds.PruneBundle(ctx, m.c.TrustDomain.IDString(), expiresBefore)
-	if err != nil {
-		return fmt.Errorf("unable to prune bundle: %w", err)
-	}
-
-	if changed {
-		telemetry_server.IncrManagerPrunedBundleCounter(m.c.Metrics)
-		m.c.Log.Debug("Expired certificates were successfully pruned from bundle")
-		m.bundleUpdated()
-	}
-
-	return nil
+func (m *Manager) PruneBundle(ctx context.Context) error {
+	return m.bundles.PruneBundle(ctx)
 }
 
 func (m *Manager) PruneCAJournals(ctx context.Context) (err error) {
@@ -723,8 +709,8 @@ func (m *Manager) PruneCAJournals(ctx context.Context) (err error) {
 func (m *Manager) ProcessBundleUpdates(ctx context.Context) {
 	for {
 		select {
-		case <-m.bundleUpdatedCh:
-			if err := m.notifyBundleUpdated(ctx); err != nil {
+		case <-m.bundles.Updates():
+			if err := m.bundles.NotifyBundleUpdated(ctx); err != nil {
 				m.c.Log.WithError(err).Warn("Failed to notify on bundle update")
 			}
 		case taintedAuthorities := <-m.taintedUpstreamAuthoritiesCh:
@@ -741,22 +727,7 @@ func (m *Manager) ProcessBundleUpdates(ctx context.Context) {
 }
 
 func (m *Manager) NotifyBundleLoaded(ctx context.Context) error {
-	// if initialization has triggered a "bundle updated" event (e.g. server CA
-	// was rotated), we want to drain it now as we're about to emit the initial
-	// bundle loaded event.  otherwise, plugins will get an immediate "bundle
-	// updated" event right after "bundle loaded".
-	m.dropBundleUpdated()
-
-	var bundle *common.Bundle
-	return m.notify(ctx, "bundle loaded", true,
-		func(ctx context.Context) (err error) {
-			bundle, err = m.fetchRequiredBundle(ctx)
-			return err
-		},
-		func(ctx context.Context, n notifier.Notifier) error {
-			return n.NotifyAndAdviseBundleLoaded(ctx, bundle)
-		},
-	)
+	return m.bundles.Initialize(ctx)
 }
 
 func (m *Manager) activateJWTKey(ctx context.Context) {
@@ -839,15 +810,12 @@ func (m *Manager) activateWITKey(ctx context.Context) {
 }
 
 func (m *Manager) bundleUpdated() {
-	select {
-	case m.bundleUpdatedCh <- struct{}{}:
-	default:
-	}
+	m.bundles.BundleUpdated()
 }
 
 func (m *Manager) dropBundleUpdated() {
 	select {
-	case <-m.bundleUpdatedCh:
+	case <-m.bundles.Updates():
 	default:
 	}
 }
@@ -957,68 +925,6 @@ func (m *Manager) processTaintedUpstreamAuthorities(ctx context.Context, tainted
 	// Intermediate is safe. Notify rotator to force rotation
 	// of tainted X.509 SVID.
 	m.c.CA.NotifyTaintedX509Authorities(taintedAuthorities)
-
-	return nil
-}
-
-func (m *Manager) notifyBundleUpdated(ctx context.Context) error {
-	var bundle *common.Bundle
-	return m.notify(ctx, "bundle updated", false,
-		func(ctx context.Context) (err error) {
-			bundle, err = m.fetchRequiredBundle(ctx)
-			return err
-		},
-		func(ctx context.Context, n notifier.Notifier) error {
-			return n.NotifyBundleUpdated(ctx, bundle)
-		},
-	)
-}
-
-func (m *Manager) notify(ctx context.Context, event string, advise bool, pre func(context.Context) error, do func(context.Context, notifier.Notifier) error) error {
-	notifiers := m.c.Catalog.GetNotifiers()
-	if len(notifiers) == 0 {
-		return nil
-	}
-
-	if pre != nil {
-		if err := pre(ctx); err != nil {
-			return err
-		}
-	}
-
-	errsCh := make(chan error, len(notifiers))
-	for _, n := range notifiers {
-		go func(n notifier.Notifier) {
-			err := do(ctx, n)
-			f := m.c.Log.WithFields(logrus.Fields{
-				telemetry.Notifier: n.Name(),
-				telemetry.Event:    event,
-			})
-			if err == nil {
-				f.Debug("Notifier handled event")
-			} else {
-				f := f.WithError(err)
-				if advise {
-					f.Error("Notifier failed to handle event")
-				} else {
-					f.Warn("Notifier failed to handle event")
-				}
-			}
-			errsCh <- err
-		}(n)
-	}
-
-	var allErrs error
-	for range notifiers {
-		// don't select on the ctx here as we can rely on the plugins to
-		// respond to context cancellation and return an error.
-		if err := <-errsCh; err != nil {
-			allErrs = errors.Join(allErrs, err)
-		}
-	}
-	if allErrs != nil {
-		return fmt.Errorf("one or more notifiers returned an error: %w", allErrs)
-	}
 
 	return nil
 }

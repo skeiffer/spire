@@ -12,7 +12,6 @@ the existing local and UpstreamAuthority behavior.
 ```hcl
 server {
     data_dir = "/var/lib/spire/server-one"
-    external_x509_control_dir = "/var/lib/spire-external/server-one"
 }
 plugins {
     X509SVIDIssuer "external_issuer" {
@@ -38,87 +37,39 @@ The existing `ca_ttl` remains the token-key lifetime in this mode. X.509 local,
 upstream and downstream authority administration is unavailable after normal
 API authorization. WIT administration remains Unimplemented.
 
-## Provisioning and protected state
+## State and recovery
 
-The operator must provision the control directory independently of `data_dir`.
-They must not contain one another. On POSIX, the assertion and state paths must
-be owned by the process user or root, without group/other write access or
-symlinks. Windows checks trusted ownership and write ACLs and uses the existing
-owner-private atomic-write protections. Both the control directory and
-`data_dir` are exclusively locked for the server process lifetime.
+External mode uses the ordinary server `data_dir` and configured KeyManager.
+Public issuer metadata is stored below `data_dir/external-x509/issuer`, and
+public token-key attribution is stored below `data_dir/external-x509/tokens`.
+The files are bounded, strictly decoded JSON and are replaced with SPIRE's
+standard private atomic-file helper. Missing metadata is an ordinary first
+start. Corrupt metadata, unsupported versions, or referenced token private
+keys whose public keys do not match still fail startup.
 
-Before any catalog configuration, SPIRE reads `provision.json`:
+Private token signing keys remain in KeyManager. New JWT and WIT key IDs are
+randomly unique and role-specific. Unrelated pre-existing KeyManager keys are
+not deleted, overwritten, or required to belong to this server.
 
-```json
-{
-  "version": 1,
-  "trust_domain": "example.org",
-  "instance": "unique-server-instance",
-  "issuer": "external_issuer",
-  "issuer_checksum": "SHA256_OF_THE_ISSUER_EXECUTABLE",
-  "key_manager_digest": "SHA256_OF_THE_CANONICAL_KEYMANAGER_CONFIGURATION",
-  "retained_roots": []
-}
-```
-
-The issuer name and nonempty executable checksum must match the plugin
-configuration. Compute `key_manager_digest` with
-`externalstate.KeyManagerDigest` from the configuration returned by
-`catalog.PluginConfigsFromHCLNode`, using the same HCL loader as the server.
-It hashes the canonical JSON fields `Name`, `Path`, `Checksum`, `Data`, and
-`Args`, including the exact catalog-rendered plugin data. Do not hash the
-original HCL text instead. Dynamic KeyManager plugin data is frozen after this
-comparison so later reconfiguration cannot switch namespaces.
-
-This assertion is a trusted local operator statement, not a remotely signed
-credential. It must identify dedicated KeyManager storage. For disk
-KeyManager, `keys_path` must be absolute and absent at first provisioning; an
-existing file is rejected before Configure can parse private keys. On restart,
-restore only the matching dedicated key storage. Namespace isolation for
-opaque remote KeyManagers is an operator provisioning invariant; all returned
-keys must subsequently match token metadata or a durable pending intent.
-Reusing a legacy CA namespace or copying arbitrary key files is not supported.
-
-`retained_roots` contains base64-encoded public DER CA certificates explicitly
-authorized for a new node's retained trust. The shared bundle may contain only
-roots justified by that assertion or the server's validated authority ledger.
-Unexplained roots cause a closed failure, not deletion or origin guessing.
-An assertion does not prove that other servers are configured in external
-mode; uniform cluster configuration is a separate deployment invariant.
-
-First provisioning requires an empty `data_dir`. SPIRE consumes this permission
-by recording ownership in `data_dir/external-x509/owner.json` and the separate
-control directory's `established.json` before catalog side effects. Token and
-authority metadata contain only public DER/keys, stable key references,
-lifetimes and transition status. Private authority signing keys remain in
-KeyManager; server and client leaf-key ownership is unchanged.
-
-The independent `checkpoint.json` binds each public metadata file to its latest
-committed digest. Its pending digest is written before replacing that metadata
-file; restart reconciles either the preceding committed file or the intended
-replacement. A rollback, deletion or unprovable restore of `data_dir` is rejected
-before configuring KeyManager. Preserve this independent evidence separately;
-rolling it back together with all runtime and key state defeats that evidence.
-Do not manually reformat metadata files.
-
-An established instance with missing, corrupt, copied, mismatched or
-unknown-version state fails closed. Ambiguous `.tmp` files also require
-reconciliation; they are not silently overwritten. A failed initialization may
-need a verified restore rather than a new first-provision assertion. Never
-delete the ownership record to make an established node initialize again.
-If both independent evidence stores are lost, SPIRE cannot infer whether this
-is a new instance; automatic complete-state-loss recovery is not provided.
+There is no independent provisioning assertion, owner marker, checkpoint,
+lock, or rollback detector. Back up `data_dir`, the matching KeyManager, and
+the datastore consistently using the same operational practices as other
+SPIRE server state. Loss of public metadata is treated as a fresh state and
+cannot be distinguished from intentional first startup. Atomic replacement
+does not provide a transaction across KeyManager, the filesystem, and the
+datastore.
 
 Durable intent precedes key generation or root/key publication. Public bindings
 precede additive publication and read-back; final durable commit precedes
 signer or authority activation. Recovery reconciles pending operations and
 existing bundle taints/revocations rather than resurrecting revoked keys.
-Missing private keys with valid public history are replaced under new
-identities while previously published verification material is retained.
+Missing or mismatched private keys referenced by token metadata fail startup;
+unreferenced KeyManager keys are ignored. Previously published verification
+material is retained additively.
 
-The integration fixture's `prepare` command generates complete isolated
-assertions and configurations for a runnable example. That fixture is a test
-issuer, not a production provisioning or CA service.
+The integration fixture's `prepare` command generates isolated configurations
+for a runnable example. That fixture is a test issuer, not a production
+provisioning or CA service.
 
 ## Bootstrap contract
 
@@ -161,31 +112,26 @@ does not guarantee uninterrupted operation for sub-renewal-interval lifetimes.
 ## Rollover and failure behavior
 
 Authority versions are immutable. Reusing a version with different certificate
-bytes is rejected. Successor roots are published while the current version
-continues to issue. Selecting the successor requires an explicit host-side
-activation after operators confirm propagation; publication alone is not global
-delivery confirmation.
+bytes is rejected. The first valid authority is published, read back, persisted,
+and activated immediately, matching native first-start behavior. A successor
+is published and retained as prepared while the current authority remains in
+use. The host checks the lifecycle every ten seconds and activates the prepared
+successor after the native activation threshold: the smaller of one sixth of
+the current effective signing-path lifetime and seven days before the current
+effective expiry. Every certificate in each usable path constrains that
+effective expiry; the best usable advertised path is used.
 
-To select an initial or already-staged successor, atomically replace
-`activate.json` in the protected control directory:
+A successor that does not improve the current effective expiry is not
+activated. An unusable successor is rejected. If the current path expires, a
+usable improving prepared successor can be activated on the lifecycle check.
+Publication and datastore read-back still precede use, but do not prove global
+delivery to every verifier.
 
-```json
-{
-  "version": 1,
-  "binding": "SHA256_OF_THE_CANONICAL_PROVISIONING_ASSERTION_JSON",
-  "authority_version": "issuer-version-to-select"
-}
-```
-
-`binding` is SHA-256 of `json.Marshal(externalstate.Assertion)` for the
-provisioned assertion; it also appears in the established ownership record.
-The file is checked once per second. It must name an exact version observed
-and revalidated in the current healthy subscription session and committed
-after datastore publication. Changing this file asserts that the operator
-confirmed propagation to the relevant verifiers; SPIRE cannot infer delivery
-from the file or a timer. The issuer must keep honoring the previous selected
-version during staging and re-advertise it when reconnecting if it is still
-selected. A multi-root version does not let the host select a root within it.
+The issuer must keep honoring the current version during staging and
+re-advertise it after reconnect so the host can re-establish current-session
+observations. The v1 protocol cannot request a historical version or acknowledge
+global propagation. A multi-root version does not let the host select a root
+within it.
 
 Published old roots remain through their certificate expiry plus at least
 the existing 24-hour pruning margin. Additive updates preserve token keys,
@@ -214,11 +160,11 @@ state-loss recovery are outside this iteration.
 
 Bootstrap and issuance waits are bounded to 30 seconds; concurrent issuance
 is bounded to 64 requests. A snapshot is limited to 1 MiB, 16 advertised chains,
-eight intermediates per chain and 64 KiB per certificate. At most 64 immutable
-versions are retained, and retained roots selected for publication are limited
-to 2 MiB to leave room within existing transport limits. The host rejects activation beyond those bounds
-rather than evicting version/content bindings. An archival/migration policy
-requires separate approval. Metadata files are limited to 8 MiB.
+eight intermediates per chain and 64 KiB per certificate. At most 64 immutable versions are retained, and retained roots selected for
+publication are limited to 2 MiB to leave room within existing transport
+limits. The host rejects snapshots beyond those bounds rather than evicting
+version/content bindings. An archival/migration policy requires separate
+approval. Metadata files are limited to 2 MiB.
 
 Rollback must retain compatible external-mode code and matching state. The
 frozen v1 plugin interface, Agent protocol and datastore APIs/schema are

@@ -14,6 +14,10 @@ authority versions and provider error strings are not metric labels. The
 `server.tokens` check; an observed issuer stream failure does not disable healthy
 independent token authorities.
 
+Local-CA and external-issuer modes share bundle notification and pruning code.
+The existing `ca,manager,bundle,prune` and `ca,manager,bundle,pruned` metrics
+therefore also cover bundle pruning in external mode.
+
 | Type         | Keys                                              | Labels                       | Description                                                                                                                                                                                                                              |
 |--------------|---------------------------------------------------|------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Call Counter | `rpc`, `<service>`, `<method>`                    |                              | Call counters over the [SPIRE Server RPCs](https://github.com/spiffe/spire-api-sdk).                                                                                                                                                     |

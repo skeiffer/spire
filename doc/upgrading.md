@@ -87,12 +87,14 @@ binary that understands its versioned external authority and token metadata,
 or an explicitly verified matching restore. Removing the plugin or selecting an
 internal-only binary would create another hierarchy; this is a mode migration,
 not a supported rollback. Do not remove published trust needed by outstanding
-credentials. Preserve the independent provisioning record, public metadata, and
-matching KeyManager identities and availability together. Metadata alone cannot
-recover missing private keys.
+credentials. Preserve `data_dir`, public metadata, datastore state, and matching
+KeyManager identities together. Metadata alone cannot recover missing private
+keys. The removed prototype provisioning/checkpoint format is not migrated;
+start with fresh isolated development state.
 
 See the [external issuer operations guide](plugin_server_x509svidissuer.md) for
-first provisioning, staging, state-loss handling, and protocol limitations.
+first startup, automatic staging and activation, state-loss handling, and
+protocol limitations.
 
 ## Experimental Features
 

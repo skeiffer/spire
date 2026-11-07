@@ -5,8 +5,6 @@ fixture control -version v2
 wait-success check-propagation agent1
 wait-success check-propagation agent2
 wait-success check-propagation agent-old
-fixture activate -instance server1 -version v2
-fixture activate -instance server2 -version v2
 wait-success mint-leaf server1
 wait-success mint-leaf server2
 fixture verify-tokens

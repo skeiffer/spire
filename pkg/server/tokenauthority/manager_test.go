@@ -9,7 +9,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -170,29 +169,18 @@ func TestManagerRestartEnablementChanges(t *testing.T) {
 	})
 }
 
-func TestManagerDisabledRestartDoesNotReplaceMissingPrivateKey(t *testing.T) {
+func TestManagerDisabledRestartRejectsMissingReferencedPrivateKey(t *testing.T) {
 	test := newManagerTest(t, false, true)
 	enabled := test.newManager(true)
 	old := enabled.state.JWT.find(enabled.GetCurrentJWTKeySlot().AuthorityID())
 	require.NotNil(t, old)
-	keysBefore, err := test.keyManager.GetKeys(context.Background())
-	require.NoError(t, err)
-
 	test.config.DisableJWTSVIDs = true
 	test.config.KeyManager = &missingKeyManager{
 		KeyManager: test.keyManager,
 		missingID:  old.KeyID,
 	}
-	disabled := test.newManager(false)
-	require.True(t, disabled.IsJWTSVIDsDisabled())
-	keysAfter, err := test.keyManager.GetKeys(context.Background())
-	require.NoError(t, err)
-	require.Len(t, keysAfter, len(keysBefore))
-
-	test.config.DisableJWTSVIDs = false
-	reEnabled := test.newManager(false)
-	require.NotEqual(t, old.KID, reEnabled.GetCurrentJWTKeySlot().AuthorityID())
-	require.Contains(t, keyIDs(test.fetchBundle().JwtSigningKeys), old.KID)
+	_, err := NewManager(context.Background(), test.config)
+	require.EqualError(t, err, `referenced token authority key "`+old.KeyID+`" is missing`)
 }
 
 func TestManagerKeyTypeChangeAppliesToFutureKeys(t *testing.T) {
@@ -322,7 +310,7 @@ func TestManagerDoesNotSignWithTaintedKey(t *testing.T) {
 	}
 }
 
-func TestManagerReplacesMissingPrivateKey(t *testing.T) {
+func TestManagerRejectsMissingPrivateKey(t *testing.T) {
 	test := newManagerTest(t, false, true)
 	manager := test.newManager(true)
 	old := manager.state.JWT.find(manager.GetCurrentJWTKeySlot().AuthorityID())
@@ -332,12 +320,11 @@ func TestManagerReplacesMissingPrivateKey(t *testing.T) {
 		KeyManager: test.keyManager,
 		missingID:  old.KeyID,
 	}
-	restarted := test.newManager(false)
-	require.NotEqual(t, old.KID, restarted.GetCurrentJWTKeySlot().AuthorityID())
-	require.Contains(t, keyIDs(test.fetchBundle().JwtSigningKeys), old.KID)
+	_, err := NewManager(context.Background(), test.config)
+	require.EqualError(t, err, `referenced token authority key "`+old.KeyID+`" is missing`)
 }
 
-func TestManagerRejectsUnattributableDedicatedNamespaceKeys(t *testing.T) {
+func TestManagerIgnoresUnreferencedKeyManagerKeys(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		keyID string
@@ -350,8 +337,12 @@ func TestManagerRejectsUnattributableDedicatedNamespaceKeys(t *testing.T) {
 			_, err := test.keyManager.GenerateKey(context.Background(), tt.keyID, keymanager.ECP256)
 			require.NoError(t, err)
 
-			_, err = NewManager(context.Background(), test.config)
-			require.EqualError(t, err, `unprovable unknown token authority key "`+tt.keyID+`"`)
+			manager, err := NewManager(context.Background(), test.config)
+			require.NoError(t, err)
+			require.NotNil(t, manager)
+			key, err := test.keyManager.GetKey(context.Background(), tt.keyID)
+			require.NoError(t, err)
+			require.Equal(t, tt.keyID, key.ID())
 		})
 	}
 }
@@ -401,73 +392,50 @@ func TestManagerMetadataValidation(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		content string
-		fresh   bool
 		err     string
 	}{
-		{name: "missing established metadata", err: "token authority metadata is missing"},
-		{name: "unknown version", content: `{"version":99}`, fresh: true, err: "unsupported token authority metadata version 99"},
-		{name: "corrupt", content: `{`, fresh: true, err: "decode token authority metadata:"},
+		{name: "unknown version", content: `{"version":99}`, err: "unsupported token authority metadata version 99"},
+		{name: "corrupt", content: `{`, err: "decode token authority metadata:"},
+		{name: "unknown field", content: `{"version":1,"trust_domain":"spiffe://example.org","extra":true}`, err: `unknown field "extra"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			test := newManagerTest(t, true, true)
 			if tt.content != "" {
 				require.NoError(t, os.WriteFile(filepath.Join(test.config.StateDir, metadataFileName), []byte(tt.content), 0o600))
 			}
-			_, err := NewManager(context.Background(), test.configWithFresh(tt.fresh))
+			_, err := NewManager(context.Background(), test.config)
 			require.ErrorContains(t, err, tt.err)
 		})
 	}
 }
 
-func TestManagerRejectsUnsafeMetadataBeforeParsing(t *testing.T) {
-	t.Run("ambiguous temporary file", func(t *testing.T) {
-		test := newManagerTest(t, true, true)
-		require.NoError(t, os.WriteFile(test.config.StateDir+string(filepath.Separator)+metadataFileName+".tmp", []byte(`{`), 0o600))
-
-		_, err := NewManager(context.Background(), test.config)
-		require.ErrorContains(t, err, "ambiguous pending state write")
-		require.NotContains(t, err.Error(), "decode token authority metadata")
-	})
-
-	t.Run("symlink", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("symlink creation requires additional privileges on windows")
-		}
-		test := newManagerTest(t, true, true)
-		target := filepath.Join(test.config.StateDir, "target.json")
-		require.NoError(t, os.WriteFile(target, []byte(`{`), 0o600))
-		require.NoError(t, os.Symlink(target, filepath.Join(test.config.StateDir, metadataFileName)))
-
-		_, err := NewManager(context.Background(), test.config)
-		require.ErrorContains(t, err, "symlink")
-		require.NotContains(t, err.Error(), "decode token authority metadata")
-	})
-
-	t.Run("unsafe permissions", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("posix permissions are not available on windows")
-		}
-		test := newManagerTest(t, true, true)
-		test.newManager(true)
-		path := filepath.Join(test.config.StateDir, metadataFileName)
-		require.NoError(t, os.Chmod(path, 0o666))
-
-		_, err := NewManager(context.Background(), test.configWithFresh(false))
-		require.ErrorContains(t, err, "unsafe permissions")
-		require.NotContains(t, err.Error(), "decode token authority metadata")
-	})
+func TestManagerMissingMetadataCreatesUniqueKeysWithoutOverwritingExistingKeys(t *testing.T) {
+	test := newManagerTest(t, false, false)
+	foreign, err := test.keyManager.GenerateKey(context.Background(), "foreign-key", keymanager.ECP256)
+	require.NoError(t, err)
+	manager := test.newManager(false)
+	require.NotNil(t, manager)
+	loaded, err := test.keyManager.GetKey(context.Background(), "foreign-key")
+	require.NoError(t, err)
+	require.Equal(t, foreign.Public(), loaded.Public())
+	require.Contains(t, manager.state.JWT.find(manager.state.JWT.Current).KeyID, "token-authority-jwt-")
+	require.Contains(t, manager.state.WIT.find(manager.state.WIT.Current).KeyID, "token-authority-wit-")
 }
 
-func TestManagerRejectsAmbiguousWriteAndRemainsFailed(t *testing.T) {
+func TestManagerRejectsMismatchedReferencedPrivateKey(t *testing.T) {
 	test := newManagerTest(t, false, true)
 	manager := test.newManager(true)
-	tmpPath := filepath.Join(test.config.StateDir, metadataFileName+".tmp")
-	require.NoError(t, os.WriteFile(tmpPath, []byte(`{}`), 0o600))
-
-	err := manager.PrepareJWTKey(context.Background())
-	require.ErrorContains(t, err, "ambiguous pending state write")
-	require.NoError(t, os.Remove(tmpPath))
-	require.EqualError(t, manager.PrepareJWTKey(context.Background()), "token authority metadata state is uncertain: ambiguous pending state write")
+	record := manager.state.JWT.find(manager.state.JWT.Current)
+	require.NotNil(t, record)
+	replacement, err := test.keyManager.GenerateKey(context.Background(), "replacement", keymanager.ECP256)
+	require.NoError(t, err)
+	test.config.KeyManager = &substitutingKeyManager{
+		KeyManager:  test.keyManager,
+		keyID:       record.KeyID,
+		replacement: replacement,
+	}
+	_, err = NewManager(context.Background(), test.config)
+	require.ErrorContains(t, err, "mismatched key binding")
 }
 
 func TestManagerCheckHealth(t *testing.T) {
@@ -656,8 +624,6 @@ func newManagerTest(t *testing.T, disableJWT, disableWIT bool) *managerTest {
 			Metrics:         fakemetrics.New(),
 			TrustDomain:     testTrustDomain,
 			StateDir:        t.TempDir(),
-			Binding:         "server-one",
-			Fresh:           true,
 			JWTKeyType:      keymanager.ECP256,
 			WITKeyType:      keymanager.ECP256,
 			DisableJWTSVIDs: disableJWT,
@@ -675,9 +641,8 @@ func (t *managerTest) newManager(fresh bool) *Manager {
 	return manager
 }
 
-func (t *managerTest) configWithFresh(fresh bool) Config {
+func (t *managerTest) configWithFresh(_ bool) Config {
 	config := t.config
-	config.Fresh = fresh
 	return config
 }
 
@@ -761,6 +726,19 @@ func (m *controllableKeyManager) GenerateKey(ctx context.Context, id string, key
 type missingKeyManager struct {
 	keymanager.KeyManager
 	missingID string
+}
+
+type substitutingKeyManager struct {
+	keymanager.KeyManager
+	keyID       string
+	replacement keymanager.Key
+}
+
+func (m *substitutingKeyManager) GetKey(ctx context.Context, id string) (keymanager.Key, error) {
+	if id == m.keyID {
+		return m.replacement, nil
+	}
+	return m.KeyManager.GetKey(ctx, id)
 }
 
 func (m *missingKeyManager) GetKey(ctx context.Context, id string) (keymanager.Key, error) {

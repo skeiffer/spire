@@ -4,8 +4,10 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"math/big"
 	"os"
@@ -13,21 +15,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andres-erbsen/clock"
 	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
+	"github.com/spiffe/spire/pkg/common/diskutil"
 	"github.com/spiffe/spire/pkg/common/health"
-	"github.com/spiffe/spire/pkg/server/externalstate"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	defaultBootstrapTimeout = 30 * time.Second
-	defaultIssueTimeout     = 30 * time.Second
-	defaultReconnectMin     = time.Second
-	defaultReconnectMax     = 30 * time.Second
-	defaultHistoryLimit     = 64
-	rootRetentionMargin     = 24 * time.Hour
-	maxRootBundleBytes      = 2 << 20
+	defaultBootstrapTimeout    = 30 * time.Second
+	defaultIssueTimeout        = 30 * time.Second
+	defaultReconnectMin        = time.Second
+	defaultReconnectMax        = 30 * time.Second
+	defaultHistoryLimit        = 64
+	lifecycleInterval          = 10 * time.Second
+	rootRetentionMargin        = 24 * time.Hour
+	maxRootBundleBytes         = 2 << 20
+	maxAuthorityStateBytes     = 2 << 20
+	activationThresholdCap     = 7 * 24 * time.Hour
+	activationThresholdDivisor = 6
 )
 
 type PublishAuthoritiesFunc func(context.Context, []*x509.Certificate) error
@@ -35,12 +42,9 @@ type PublishAuthoritiesFunc func(context.Context, []*x509.Certificate) error
 type HostConfig struct {
 	Plugin             X509SVIDIssuer
 	PublishAuthorities PublishAuthoritiesFunc
-	ActivationVersion  string
-	SelectVersion      func() (string, error)
 	StateDir           string
-	Binding            string
-	Fresh              bool
 	WriteState         func(string, any) error
+	Clock              clock.Clock
 	Now                func() time.Time
 	OnError            func(error)
 	HealthChecker      health.Checker
@@ -53,10 +57,10 @@ type HostConfig struct {
 
 type authorityState struct {
 	Version   int                           `json:"version"`
-	Binding   string                        `json:"binding"`
 	Records   []*issuerv1.AuthoritySnapshot `json:"records"`
 	Committed map[string]bool               `json:"committed"`
 	Active    string                        `json:"active"`
+	Prepared  string                        `json:"prepared,omitempty"`
 }
 
 type Host struct {
@@ -79,8 +83,11 @@ type Host struct {
 }
 
 func NewHost(config HostConfig) *Host {
+	if config.Clock == nil {
+		config.Clock = clock.New()
+	}
 	if config.Now == nil {
-		config.Now = time.Now
+		config.Now = config.Clock.Now
 	}
 	if config.BootstrapTimeout == 0 {
 		config.BootstrapTimeout = defaultBootstrapTimeout
@@ -98,7 +105,7 @@ func NewHost(config HostConfig) *Host {
 		config.HistoryLimit = defaultHistoryLimit
 	}
 	if config.WriteState == nil {
-		config.WriteState = externalstate.WriteJSON
+		config.WriteState = writeAuthorityState
 	}
 	return &Host{
 		c: config, store: NewAuthorityStore(rootRetentionMargin, config.HistoryLimit),
@@ -111,19 +118,19 @@ func (h *Host) Initialize(ctx context.Context) error {
 	if h.c.Plugin == nil || h.c.PublishAuthorities == nil {
 		return errors.New("external X509-SVID issuer plugin and authority publisher are required")
 	}
-	h.state = authorityState{Version: 1, Binding: h.c.Binding, Committed: make(map[string]bool)}
+	h.state = authorityState{Version: 1, Committed: make(map[string]bool)}
 	if h.c.StateDir != "" {
-		err := externalstate.ReadJSON(h.statePath(), &h.state)
+		err := readAuthorityState(h.statePath(), &h.state)
 		switch {
-		case errors.Is(err, os.ErrNotExist) && h.c.Fresh:
+		case errors.Is(err, os.ErrNotExist):
 			if err := h.persist(h.state); err != nil {
 				return err
 			}
 		case err != nil:
 			return fmt.Errorf("restore external authority state: %w", err)
 		}
-		if h.state.Version != 1 || h.state.Binding != h.c.Binding || h.state.Committed == nil || len(h.state.Records) > h.c.HistoryLimit {
-			return errors.New("invalid or mismatched external authority state")
+		if h.state.Version != 1 || h.state.Committed == nil || len(h.state.Records) > h.c.HistoryLimit {
+			return errors.New("invalid external authority state")
 		}
 		for _, record := range h.state.Records {
 			snapshot, err := SnapshotFromProto(record)
@@ -137,11 +144,14 @@ func (h *Host) Initialize(ctx context.Context) error {
 		if h.state.Active != "" && !h.state.Committed[h.state.Active] {
 			return errors.New("active external authority has no committed publication")
 		}
+		if h.state.Prepared != "" && !h.state.Committed[h.state.Prepared] {
+			return errors.New("prepared external authority has no committed publication")
+		}
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	h.cancel = cancel
 	h.wg.Go(func() { h.consume(runCtx) })
-	h.wg.Go(func() { h.watchActivation(runCtx) })
+	h.wg.Go(func() { h.runLifecycle(runCtx) })
 	timer := time.NewTimer(h.c.BootstrapTimeout)
 	defer timer.Stop()
 	select {
@@ -154,7 +164,7 @@ func (h *Host) Initialize(ctx context.Context) error {
 		defer h.mu.RUnlock()
 		cause := h.lastErr
 		if cause == nil {
-			cause = errors.New("no usable authority matching the activation request was observed")
+			cause = errors.New("no usable external authority was observed")
 		}
 		return fmt.Errorf("timed out waiting for selected external authority: %w", cause)
 	case <-h.readyCh:
@@ -190,7 +200,7 @@ func (h *Host) CheckHealth() health.State {
 	}
 	var details any
 	if lastErr != nil {
-		details = "external authority is unavailable; inspect the issuer session and activation state"
+		details = "external authority is unavailable; inspect the issuer session and authority state"
 	}
 	return health.State{Live: true, Ready: ready, ReadyDetails: details}
 }
@@ -272,11 +282,16 @@ func (h *Host) Activate(ctx context.Context, version string) error {
 	}
 	next := h.state
 	next.Active = version
+	if next.Prepared == version {
+		next.Prepared = ""
+	}
 	if err := h.persist(next); err != nil {
 		h.invalidate(err)
 		return err
 	}
+	h.mu.Lock()
 	h.state = next
+	h.mu.Unlock()
 	if err := h.store.Activate(version, h.c.Now()); err != nil {
 		h.invalidate(err)
 		return err
@@ -326,30 +341,52 @@ func (h *Host) consume(ctx context.Context) {
 	}
 }
 
-func (h *Host) watchActivation(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
+func (h *Host) runLifecycle(ctx context.Context) {
+	ticker := h.c.Clock.Ticker(lifecycleInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			version, err := h.selectedVersion()
-			if err == nil {
-				err = h.Activate(ctx, version)
-			}
-			if err != nil {
+			if err := h.activatePrepared(ctx); err != nil {
 				h.report(err)
 			}
 		}
 	}
 }
 
-func (h *Host) selectedVersion() (string, error) {
-	if h.c.SelectVersion != nil {
-		return h.c.SelectVersion()
+func (h *Host) activatePrepared(ctx context.Context) error {
+	h.mu.RLock()
+	active, prepared := h.state.Active, h.state.Prepared
+	h.mu.RUnlock()
+	if prepared == "" {
+		return nil
 	}
-	return h.c.ActivationVersion, nil
+	if active == "" {
+		return h.Activate(ctx, prepared)
+	}
+	current, err := h.store.Snapshot(active)
+	if err != nil {
+		return err
+	}
+	next, err := h.store.Snapshot(prepared)
+	if err != nil {
+		return err
+	}
+	now := h.c.Now()
+	currentExpiry, currentErr := effectiveSnapshotExpiry(current, now)
+	nextExpiry, nextErr := effectiveSnapshotExpiry(next, now)
+	if nextErr != nil {
+		return fmt.Errorf("prepared external authority is unusable: %w", nextErr)
+	}
+	if !nextExpiry.After(currentExpiry) {
+		return nil
+	}
+	if currentErr != nil || now.After(authorityActivationThreshold(current.PublishedAt, currentExpiry)) {
+		return h.Activate(ctx, prepared)
+	}
+	return nil
 }
 
 func reconnectJitter(backoff time.Duration) time.Duration {
@@ -394,7 +431,9 @@ func (h *Host) applySnapshot(ctx context.Context, in *issuerv1.AuthoritySnapshot
 			h.transition.Unlock()
 			return err
 		}
+		h.mu.Lock()
 		h.state = next
+		h.mu.Unlock()
 	}
 	if err := h.store.Publish(snapshot); err != nil {
 		h.transition.Unlock()
@@ -425,22 +464,29 @@ func (h *Host) applySnapshot(ctx context.Context, in *issuerv1.AuthoritySnapshot
 		h.transition.Unlock()
 		return err
 	}
-	h.state = next
 	h.mu.Lock()
+	h.state = next
 	h.seen[snapshot.Version] = true
 	h.mu.Unlock()
 	h.transition.Unlock()
-	version, err := h.selectedVersion()
-	if err != nil {
+	h.mu.RLock()
+	active := h.state.Active
+	h.mu.RUnlock()
+	if active == "" || active == snapshot.Version {
+		return h.Activate(ctx, snapshot.Version)
+	}
+	h.transition.Lock()
+	next = h.state
+	next.Prepared = snapshot.Version
+	if err := h.persist(next); err != nil {
+		h.transition.Unlock()
 		return err
 	}
-	if version == "" && h.c.StateDir == "" && h.c.SelectVersion == nil {
-		version = snapshot.Version
-	}
-	if version == snapshot.Version {
-		return h.Activate(ctx, version)
-	}
-	return nil
+	h.mu.Lock()
+	h.state = next
+	h.mu.Unlock()
+	h.transition.Unlock()
+	return h.activatePrepared(ctx)
 }
 
 func (h *Host) invalidate(err error) {
@@ -509,6 +555,12 @@ func (h *Host) persist(state authorityState) error {
 }
 
 func usableSnapshot(snapshot Snapshot, now time.Time) error {
+	_, err := effectiveSnapshotExpiry(snapshot, now)
+	return err
+}
+
+func effectiveSnapshotExpiry(snapshot Snapshot, now time.Time) (time.Time, error) {
+	var best time.Time
 	for _, chain := range snapshot.Chains {
 		if len(chain) == 0 {
 			continue
@@ -538,9 +590,73 @@ func usableSnapshot(snapshot Snapshot, now time.Time) error {
 				Roots: roots, Intermediates: intermediates, CurrentTime: now,
 				KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 			}); err == nil {
-				return nil
+				expiry := chain[0].NotAfter
+				for _, cert := range chain[1:] {
+					expiry = minTime(expiry, cert.NotAfter)
+				}
+				if expiry.After(best) {
+					best = expiry
+				}
 			}
 		}
 	}
-	return errors.New("external authority snapshot has no currently usable signing path")
+	if best.IsZero() {
+		return time.Time{}, errors.New("external authority snapshot has no currently usable signing path")
+	}
+	return best, nil
+}
+
+func authorityActivationThreshold(issuedAt, notAfter time.Time) time.Time {
+	lifetime := notAfter.Sub(issuedAt)
+	return notAfter.Add(-min(lifetime/activationThresholdDivisor, activationThresholdCap))
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+func readAuthorityState(path string, value any) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("external authority state is not a regular file")
+	}
+	if info.Size() > maxAuthorityStateBytes {
+		return fmt.Errorf("external authority state exceeds %d bytes", maxAuthorityStateBytes)
+	}
+	decoder := json.NewDecoder(io.LimitReader(file, maxAuthorityStateBytes+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("external authority state contains trailing data")
+		}
+		return err
+	}
+	return nil
+}
+
+func writeAuthorityState(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if len(data) > maxAuthorityStateBytes {
+		return fmt.Errorf("external authority state exceeds %d bytes", maxAuthorityStateBytes)
+	}
+	return diskutil.AtomicWritePrivateFile(path, data)
 }

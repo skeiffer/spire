@@ -10,12 +10,13 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/spire/pkg/common/health"
 	"github.com/spiffe/spire/pkg/common/util"
+	"github.com/spiffe/spire/pkg/server/bundle/maintenance"
 	"github.com/spiffe/spire/pkg/server/ca/manager"
 )
 
 const (
 	rotateInterval          = 10 * time.Second
-	pruneBundleInterval     = 6 * time.Hour
+	pruneBundleInterval     = maintenance.PruneInterval
 	pruneCAJournalsInterval = 8 * time.Hour
 )
 

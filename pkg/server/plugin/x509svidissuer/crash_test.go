@@ -10,7 +10,6 @@ import (
 	"time"
 
 	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
-	"github.com/spiffe/spire/pkg/server/externalstate"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -37,9 +36,9 @@ func TestAuthorityCrashBoundariesPreserveAttributionAndCommitBarrier(t *testing.
 					return nil
 				}
 				config := HostConfig{
-					Plugin:   &fakeIssuerPlugin{stream: newStream()},
-					StateDir: t.TempDir(), Binding: "instance-one", Fresh: true,
-					ActivationVersion: "v1", Now: func() time.Time { return now },
+					Plugin:             &fakeIssuerPlugin{stream: newStream()},
+					StateDir:           t.TempDir(),
+					Now:                func() time.Time { return now },
 					PublishAuthorities: publish, OnError: func(error) { cancel() },
 				}
 				host := NewHost(config)
@@ -48,13 +47,13 @@ func TestAuthorityCrashBoundariesPreserveAttributionAndCommitBarrier(t *testing.
 					writes++
 					if writes == boundary {
 						if uncertain {
-							if err := externalstate.WriteJSON(path, value); err != nil {
+							if err := writeAuthorityState(path, value); err != nil {
 								return err
 							}
 						}
 						return errors.New("injected authority commit failure")
 					}
-					return externalstate.WriteJSON(path, value)
+					return writeAuthorityState(path, value)
 				}
 				require.Error(t, host.Initialize(ctx))
 				require.False(t, host.CheckHealth().Ready)
@@ -62,12 +61,12 @@ func TestAuthorityCrashBoundariesPreserveAttributionAndCommitBarrier(t *testing.
 					require.Positive(t, publications.Load())
 				}
 				var state authorityState
-				require.NoError(t, externalstate.ReadJSON(host.statePath(), &state))
+				require.NoError(t, readAuthorityState(host.statePath(), &state))
 				if publications.Load() != 0 {
 					require.Len(t, state.Records, 1)
 					require.Equal(t, root.Raw, state.Records[0].AuthorityChains[0].Root)
 				}
-				config.Fresh, config.OnError = false, nil
+				config.OnError = nil
 				config.Plugin = &fakeIssuerPlugin{stream: newStream()}
 				restarted := NewHost(config)
 				require.NoError(t, restarted.Initialize(t.Context()))
@@ -95,7 +94,7 @@ func TestSilentStreamExpiryDisablesIssuanceWithoutHealthMinting(t *testing.T) {
 			issues.Add(1)
 			return nil, errors.New("unexpected issuance")
 		}},
-		ActivationVersion: "v1", Now: func() time.Time { return time.Unix(seconds.Load(), 0) },
+		Now:                func() time.Time { return time.Unix(seconds.Load(), 0) },
 		PublishAuthorities: func(context.Context, []*x509.Certificate) error { return nil },
 	})
 	require.NoError(t, host.Initialize(t.Context()))

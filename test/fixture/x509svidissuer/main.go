@@ -10,8 +10,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/url"
 	"os"
@@ -26,7 +28,6 @@ import (
 	identityv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/hostservice/server/identityprovider/v1"
 	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
-	"github.com/spiffe/spire/pkg/server/externalstate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,6 +45,7 @@ type controls struct {
 	RejectIssue        bool   `json:"reject_issue"`
 	ShortTTL           int64  `json:"short_ttl"`
 	BootstrapDependent bool   `json:"bootstrap_dependent"`
+	PublishedAgo       int64  `json:"published_ago,omitempty"`
 }
 
 type issuer struct {
@@ -117,8 +119,9 @@ func (p *issuer) SubscribeAuthoritySnapshots(_ *issuerv1.SubscribeAuthoritySnaps
 			if !ok {
 				return status.Error(codes.InvalidArgument, "fixture authority version is unknown")
 			}
+			publishedAt := time.Now().Add(-time.Duration(state.PublishedAgo) * time.Second)
 			if err := stream.Send(&issuerv1.AuthoritySnapshot{
-				AuthorityVersion: state.Version, PublishedAt: timestamppb.Now(),
+				AuthorityVersion: state.Version, PublishedAt: timestamppb.New(publishedAt),
 				AuthorityChains: []*issuerv1.AuthorityChain{{Root: authority.Root}},
 			}); err != nil {
 				return err
@@ -234,14 +237,14 @@ func (p *issuer) IssueX509SVID(_ context.Context, req *issuerv1.IssueX509SVIDReq
 
 func (p *issuer) controls() (controls, error) {
 	var state controls
-	err := externalstate.ReadJSON(filepath.Join(p.dir, "controls.json"), &state)
+	err := readJSON(filepath.Join(p.dir, "controls.json"), &state)
 	return state, err
 }
 
 func loadMaterial(dir string) (map[string]material, error) {
 	roots := make(map[string]material)
 	path := filepath.Join(dir, "provider.json")
-	if err := externalstate.ReadJSON(path, &roots); err == nil {
+	if err := readJSON(path, &roots); err == nil {
 		return roots, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -254,9 +257,13 @@ func loadMaterial(dir string) (map[string]material, error) {
 		if err != nil {
 			return nil, err
 		}
+		lifetime := 24 * time.Hour
+		if version == "v2" {
+			lifetime = 48 * time.Hour
+		}
 		template := &x509.Certificate{
 			SerialNumber: big.NewInt(int64(len(roots) + 1)), Subject: pkix.Name{CommonName: "external fixture " + version},
-			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+			NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(lifetime),
 			IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		}
 		raw, err := x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
@@ -269,10 +276,40 @@ func loadMaterial(dir string) (map[string]material, error) {
 		}
 		roots[version] = material{Root: raw, Key: keyDER}
 	}
-	if err := externalstate.WriteJSON(path, roots); err != nil {
+	if err := writeJSON(path, roots); err != nil {
 		return nil, err
 	}
 	return roots, nil
+}
+
+func readJSON(path string, value any) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	decoder := json.NewDecoder(io.LimitReader(file, 2<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("JSON contains trailing data")
+		}
+		return err
+	}
+	return nil
+}
+
+func writeJSON(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0600)
 }
 
 func minTime(a, b time.Time) time.Time {

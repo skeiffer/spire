@@ -36,7 +36,7 @@ func TestRootPublicationBudgetPreservesPreviousCommittedVersion(t *testing.T) {
 	}
 	var published []int
 	host := NewHost(HostConfig{
-		ActivationVersion: "v1", Now: func() time.Time { return now },
+		Now: func() time.Time { return now },
 		PublishAuthorities: func(_ context.Context, roots []*x509.Certificate) error {
 			published = append(published, len(roots))
 			return nil

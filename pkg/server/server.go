@@ -8,7 +8,6 @@ import (
 	"net/http"
 	_ "net/http/pprof" //nolint: gosec // import registers routes on DefaultServeMux
 	"net/url"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -43,7 +42,6 @@ import (
 	"github.com/spiffe/spire/pkg/server/datastore"
 	"github.com/spiffe/spire/pkg/server/endpoints"
 	"github.com/spiffe/spire/pkg/server/endpoints/bundle"
-	"github.com/spiffe/spire/pkg/server/externalstate"
 	"github.com/spiffe/spire/pkg/server/hostservice/agentstore"
 	"github.com/spiffe/spire/pkg/server/hostservice/identityprovider"
 	"github.com/spiffe/spire/pkg/server/node"
@@ -106,21 +104,6 @@ func (s *Server) run(ctx context.Context) (err error) {
 	ctx, cancelStartup := context.WithCancel(ctx)
 	defer cancelStartup()
 	externalSelected := hasExternalIssuer(s.config.PluginConfigs)
-	var stateOwner externalstate.Owner
-	if externalSelected {
-		stateOwner, err = externalstate.Open(s.config.ExternalX509ControlDir, s.config.DataDir, s.config.TrustDomain.Name(), s.config.PluginConfigs)
-		if err != nil {
-			return fmt.Errorf("external issuer preflight: %w", err)
-		}
-		defer stateOwner.Close()
-	} else {
-		if s.config.ExternalX509ControlDir != "" {
-			return errors.New("external_x509_control_dir requires X509SVIDIssuer; changing to an internal CA is not a supported rollback")
-		}
-		if _, err := os.Lstat(filepath.Join(s.config.DataDir, "external-x509")); !errors.Is(err, os.ErrNotExist) {
-			return errors.New("external issuer state exists; restore compatible external configuration instead of creating an internal CA")
-		}
-	}
 	// Log configuration values that are useful for debugging
 	s.config.Log.WithFields(logrus.Fields{
 		telemetry.AdminIDs:       s.config.AdminIDs,
@@ -220,11 +203,9 @@ func (s *Server) run(ctx context.Context) (err error) {
 	var bundleMaintenance maintenance.Manager
 	cat.DataStore = ds_pubmanager.WithBundleUpdateCallback(cat.DataStore, func() {
 		bundlePublishingManager.BundleUpdated()
-		bundleMaintenance.BundleUpdated()
-	})
-	bundleMaintenance = maintenance.New(maintenance.Config{
-		DataStore: cat.DataStore, TrustDomain: s.config.TrustDomain.IDString(),
-		Notifiers: cat.GetNotifiers(), Log: s.config.Log,
+		if bundleMaintenance != nil {
+			bundleMaintenance.BundleUpdated()
+		}
 	})
 
 	err = s.validateTrustDomain(ctx, cat.GetDataStore())
@@ -246,17 +227,23 @@ func (s *Server) run(ctx context.Context) (err error) {
 	var authorityManager credentialissuer.AuthorityAdmin
 	var credentialLifecycle func(context.Context) error
 	if externalSelected {
-		externalIssuer, err := s.newX509SVIDIssuer(ctx, cat, healthChecker, stateOwner)
+		bundleMaintenance = maintenance.New(maintenance.Config{
+			DataStore: cat.DataStore, TrustDomain: s.config.TrustDomain.IDString(),
+			GetNotifiers: cat.GetNotifiers, Log: s.config.Log, Metrics: metrics,
+		})
+		externalIssuer, err := s.newX509SVIDIssuer(ctx, cat, healthChecker)
 		if err != nil {
 			return err
 		}
 		defer externalIssuer.Close()
+		tokenStateDir := filepath.Join(s.config.DataDir, "external-x509", "tokens")
+		if err := diskutil.CreateDataDirectory(tokenStateDir); err != nil {
+			return err
+		}
 		tokens, err := tokenauthority.NewManager(ctx, tokenauthority.Config{
 			KeyManager: cat.GetKeyManager(), DataStore: cat.DataStore,
 			Builder: credBuilder, Validator: credValidator, Metrics: metrics,
-			TrustDomain: s.config.TrustDomain, StateDir: stateOwner.StateDir(),
-			Binding: stateOwner.Binding(), Fresh: stateOwner.IsFresh(),
-			WriteFile:  stateOwner.WriteFile,
+			TrustDomain: s.config.TrustDomain, StateDir: tokenStateDir,
 			JWTKeyType: s.config.JWTKeyType, WITKeyType: s.config.WITKeyType,
 			DisableJWTSVIDs: s.config.DisableJWTSVIDs, DisableWITSVIDs: s.config.DisableWITSVIDs,
 			Log: s.config.Log,
@@ -511,7 +498,7 @@ func (s *Server) newCA(metrics telemetry.Metrics, credBuilder *credtemplate.Buil
 	})
 }
 
-func (s *Server) newX509SVIDIssuer(ctx context.Context, cat catalog.Catalog, healthChecker health.Checker, owner externalstate.Owner) (*x509svidissuer.Host, error) {
+func (s *Server) newX509SVIDIssuer(ctx context.Context, cat catalog.Catalog, healthChecker health.Checker) (*x509svidissuer.Host, error) {
 	plugin, ok := cat.GetX509SVIDIssuer()
 	if !ok {
 		return nil, errors.New("configured X509SVIDIssuer was not loaded")
@@ -519,15 +506,14 @@ func (s *Server) newX509SVIDIssuer(ctx context.Context, cat catalog.Catalog, hea
 	if _, ok := cat.GetUpstreamAuthority(); ok {
 		return nil, errors.New("X509SVIDIssuer and UpstreamAuthority cannot be configured together")
 	}
-	var host *x509svidissuer.Host
-	host = x509svidissuer.NewHost(x509svidissuer.HostConfig{
-		Plugin: plugin,
-		PublishAuthorities: x509svidissuer.NewAuthorizedBundlePublisher(cat.GetDataStore(), s.config.TrustDomain.IDString(), owner.RetainedRoots(), func(raw []byte) bool {
-			return host.AuthorizesRoot(raw)
-		}),
-		StateDir: owner.StateDir(), Binding: owner.Binding(), Fresh: owner.IsFresh(),
-		WriteState:    owner.WriteJSON,
-		SelectVersion: owner.ActivationVersion,
+	stateDir := filepath.Join(s.config.DataDir, "external-x509", "issuer")
+	if err := diskutil.CreateDataDirectory(stateDir); err != nil {
+		return nil, err
+	}
+	host := x509svidissuer.NewHost(x509svidissuer.HostConfig{
+		Plugin:             plugin,
+		PublishAuthorities: x509svidissuer.NewBundlePublisher(cat.GetDataStore(), s.config.TrustDomain.IDString()),
+		StateDir:           stateDir,
 		OnError: func(err error) {
 			s.config.Log.WithError(err).Error("External X509-SVID issuer authority session failed")
 		},

@@ -12,11 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/hashicorp/hcl"
-	"github.com/hashicorp/hcl/hcl/ast"
-	"github.com/spiffe/spire/pkg/common/catalog"
-	"github.com/spiffe/spire/pkg/server/externalstate"
+	"time"
 )
 
 func command(args []string) error {
@@ -30,6 +26,7 @@ func command(args []string) error {
 	rejectIssue := flags.Bool("reject-issue", false, "reject leaf issuance")
 	shortTTL := flags.Int64("short-ttl", 0, "shorten fixture leaf lifetime in seconds")
 	bootstrapDependent := flags.Bool("bootstrap-dependent", false, "require IdentityProvider before issuer bootstrap")
+	publishedAgo := flags.Int64("published-ago", 0, "backdate authority publication in seconds")
 	instance := flags.String("instance", "server1", "server instance")
 	joinToken := flags.String("token", "", "Agent join token")
 	server := flags.String("server", "server1", "server DNS name")
@@ -41,22 +38,9 @@ func command(args []string) error {
 	case "prepare":
 		return prepare(*root)
 	case "control":
-		return externalstate.WriteJSON(filepath.Join(*root, "provider", "controls.json"), controls{
-			Version: *version, StreamError: *streamError, RejectIssue: *rejectIssue, ShortTTL: *shortTTL, BootstrapDependent: *bootstrapDependent,
-		})
-	case "activate":
-		var assertion externalstate.Assertion
-		control := filepath.Join(*root, "control", *instance)
-		if err := externalstate.ReadJSON(filepath.Join(control, "provision.json"), &assertion); err != nil {
-			return err
-		}
-		raw, err := json.Marshal(assertion)
-		if err != nil {
-			return err
-		}
-		binding := sha256.Sum256(raw)
-		return externalstate.WriteJSON(filepath.Join(control, "activate.json"), map[string]any{
-			"version": 1, "binding": hex.EncodeToString(binding[:]), "authority_version": *version,
+		return writeJSON(filepath.Join(*root, "provider", "controls.json"), controls{
+			Version: *version, StreamError: *streamError, RejectIssue: *rejectIssue, ShortTTL: *shortTTL,
+			BootstrapDependent: *bootstrapDependent, PublishedAgo: *publishedAgo,
 		})
 	case "check":
 		return check(*root, *instance)
@@ -79,16 +63,17 @@ func prepare(root string) error {
 	if !filepath.IsAbs(root) {
 		return errors.New("fixture root must be absolute")
 	}
-	for _, dir := range []string{"provider", "shared", "conf", "control/server1", "control/server2", "keys/server1", "keys/server2", "run/server1", "run/server2"} {
+	for _, dir := range []string{"provider", "shared", "conf", "keys/server1", "keys/server2", "run/server1", "run/server2"} {
 		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(dir)), 0700); err != nil {
 			return err
 		}
 	}
-	material, err := loadMaterial(filepath.Join(root, "provider"))
-	if err != nil {
+	if _, err := loadMaterial(filepath.Join(root, "provider")); err != nil {
 		return err
 	}
-	if err := externalstate.WriteJSON(filepath.Join(root, "provider", "controls.json"), controls{Version: "v1"}); err != nil {
+	if err := writeJSON(filepath.Join(root, "provider", "controls.json"), controls{
+		Version: "v1", PublishedAgo: int64((119*time.Hour + 54*time.Minute) / time.Second),
+	}); err != nil {
 		return err
 	}
 	executable, err := os.Executable()
@@ -106,7 +91,6 @@ func prepare(root string) error {
     bind_port = "8081"
     trust_domain = "domain.test"
     data_dir = %q
-    external_x509_control_dir = %q
     socket_path = %q
     default_x509_svid_ttl = "30s"
     agent_ttl = "30s"
@@ -134,46 +118,9 @@ plugins {
         plugin_data { dir = %q }
     }
 }
-`, filepath.Join(root, "data", instance), filepath.Join(root, "control", instance), filepath.Join(root, "run", instance, "api.sock"),
+`, filepath.Join(root, "data", instance), filepath.Join(root, "run", instance, "api.sock"),
 			filepath.Join(root, "shared", "datastore.sqlite3"), filepath.Join(root, "keys", instance, "keys.json"),
 			executable, hex.EncodeToString(checksum[:]), filepath.Join(root, "provider"))
-		var parsed struct {
-			Plugins ast.Node `hcl:"plugins"`
-		}
-		if err := hcl.Decode(&parsed, configText); err != nil {
-			return err
-		}
-		configs, err := catalog.PluginConfigsFromHCLNode(parsed.Plugins)
-		if err != nil {
-			return err
-		}
-		km, ok := configs.Find("KeyManager", "disk")
-		if !ok {
-			return errors.New("fixture KeyManager configuration is missing")
-		}
-		digest, _, err := externalstate.KeyManagerDigest(km)
-		if err != nil {
-			return err
-		}
-		assertion := externalstate.Assertion{
-			Version: 1, TrustDomain: "domain.test", Instance: instance,
-			Issuer: "fixture", IssuerChecksum: hex.EncodeToString(checksum[:]), KeyManagerDigest: digest,
-			RetainedRoots: [][]byte{material["v1"].Root, material["v2"].Root},
-		}
-		control := filepath.Join(root, "control", instance)
-		if err := externalstate.WriteJSON(filepath.Join(control, "provision.json"), assertion); err != nil {
-			return err
-		}
-		raw, err := json.Marshal(assertion)
-		if err != nil {
-			return err
-		}
-		binding := sha256.Sum256(raw)
-		if err := externalstate.WriteJSON(filepath.Join(control, "activate.json"), map[string]any{
-			"version": 1, "binding": hex.EncodeToString(binding[:]), "authority_version": "v1",
-		}); err != nil {
-			return err
-		}
 		if err := os.WriteFile(filepath.Join(root, "conf", instance+".conf"), []byte(configText), 0600); err != nil {
 			return err
 		}
@@ -192,7 +139,7 @@ func check(root, instance string) error {
 	var keys struct {
 		Keys map[string]json.RawMessage `json:"keys"`
 	}
-	if err := externalstate.ReadJSON(filepath.Join(root, "keys", instance, "keys.json"), &keys); err != nil {
+	if err := readJSON(filepath.Join(root, "keys", instance, "keys.json"), &keys); err != nil {
 		return err
 	}
 	if len(keys.Keys) == 0 {
@@ -201,15 +148,6 @@ func check(root, instance string) error {
 	for keyID := range keys.Keys {
 		if !strings.HasPrefix(keyID, "token-authority-") {
 			return errors.New("non-token KeyManager role was used in external mode")
-		}
-	}
-	var assertion externalstate.Assertion
-	if err := externalstate.ReadJSON(filepath.Join(root, "control", instance, "provision.json"), &assertion); err != nil {
-		return err
-	}
-	for _, raw := range assertion.RetainedRoots {
-		if _, err := x509.ParseCertificate(raw); err != nil {
-			return err
 		}
 	}
 	return nil

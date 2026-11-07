@@ -39,7 +39,7 @@ func TestIssuanceValidatesCapturedProfileNotMutableComposerStorage(t *testing.T)
 			request.Profile.DnsNames[0] = "also changed by plugin"
 			return &issuerv1.IssueX509SVIDResponse{LeafCertificate: leaf.Raw, AuthorityVersion: "v1"}, nil
 		}},
-		ActivationVersion: "v1", Now: func() time.Time { return now },
+		Now:                func() time.Time { return now },
 		PublishAuthorities: func(context.Context, []*x509.Certificate) error { return nil },
 	})
 	require.NoError(t, host.Initialize(t.Context()))

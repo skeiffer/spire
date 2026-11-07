@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/spiffe/spire/pkg/server/externalstate"
 	"github.com/spiffe/spire/pkg/server/plugin/keymanager"
 	"github.com/spiffe/spire/proto/private/server/journal"
 )
@@ -31,7 +31,6 @@ const (
 
 type stateFile struct {
 	Version     int            `json:"version"`
-	Binding     string         `json:"binding"`
 	TrustDomain string         `json:"trust_domain"`
 	JWT         authorityState `json:"jwt"`
 	WIT         authorityState `json:"wit"`
@@ -69,16 +68,12 @@ type pendingOperation struct {
 
 func loadState(path string) (*stateFile, error) {
 	var state stateFile
-	if err := externalstate.ReadJSON(path, &state); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		if isStatePathSafetyError(err) {
-			return nil, fmt.Errorf("load token authority metadata: %w", err)
-		}
-		return nil, fmt.Errorf("decode token authority metadata: %w", err)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
-	info, err := os.Lstat(path)
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("stat token authority metadata: %w", err)
 	}
@@ -88,24 +83,19 @@ func loadState(path string) (*stateFile, error) {
 	if info.Size() > maxMetadataSize {
 		return nil, fmt.Errorf("token authority metadata exceeds %d bytes", maxMetadataSize)
 	}
-	return &state, nil
-}
-
-func isStatePathSafetyError(err error) bool {
-	message := err.Error()
-	for _, marker := range []string{
-		"ambiguous pending state write",
-		"missing protected DACL",
-		"symlink",
-		"unsafe permissions",
-		"untrusted owner",
-		"untrusted write access",
-	} {
-		if strings.Contains(message, marker) {
-			return true
-		}
+	decoder := json.NewDecoder(io.LimitReader(file, maxMetadataSize+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return nil, fmt.Errorf("decode token authority metadata: %w", err)
 	}
-	return false
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("decode token authority metadata: trailing data")
+		}
+		return nil, fmt.Errorf("decode token authority metadata: %w", err)
+	}
+	return &state, nil
 }
 
 func marshalState(state *stateFile) ([]byte, error) {
@@ -132,20 +122,17 @@ func cloneState(state *stateFile) (*stateFile, error) {
 	return &cloned, nil
 }
 
-func (s *stateFile) validate(c Config, keyPrefix string) error {
+func (s *stateFile) validate(c Config) error {
 	if s.Version != metadataVersion {
 		return fmt.Errorf("unsupported token authority metadata version %d", s.Version)
-	}
-	if s.Binding != c.Binding {
-		return fmt.Errorf("token authority binding mismatch: metadata is bound to %q", s.Binding)
 	}
 	if s.TrustDomain != c.TrustDomain.IDString() {
 		return fmt.Errorf("token authority trust domain mismatch: metadata is bound to %q", s.TrustDomain)
 	}
-	if err := s.JWT.validate("jwt", keyPrefix+"jwt-"); err != nil {
+	if err := s.JWT.validate("jwt", "token-authority-jwt-"); err != nil {
 		return err
 	}
-	return s.WIT.validate("wit", keyPrefix+"wit-")
+	return s.WIT.validate("wit", "token-authority-wit-")
 }
 
 func (s *authorityState) validate(name, keyPrefix string) error {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
@@ -49,8 +48,6 @@ type Config struct {
 	Metrics         telemetry.Metrics
 	TrustDomain     spiffeid.TrustDomain
 	StateDir        string
-	Binding         string
-	Fresh           bool
 	JWTKeyType      keymanager.KeyType
 	WITKeyType      keymanager.KeyType
 	DisableJWTSVIDs bool
@@ -66,7 +63,6 @@ type Manager struct {
 	c            Config
 	state        *stateFile
 	metadataPath string
-	keyPrefix    string
 	keyTTL       time.Duration
 	writeFile    func(string, []byte) error
 	stateErr     error
@@ -88,7 +84,6 @@ func NewManager(ctx context.Context, c Config) (*Manager, error) {
 	m := &Manager{
 		c:            c,
 		metadataPath: filepath.Join(c.StateDir, metadataFileName),
-		keyPrefix:    makeKeyPrefix(c.Binding, c.TrustDomain),
 		keyTTL:       c.Builder.Config().X509CATTL,
 		writeFile:    c.WriteFile,
 	}
@@ -97,10 +92,9 @@ func NewManager(ctx context.Context, c Config) (*Manager, error) {
 	switch {
 	case err == nil:
 		m.state = state
-	case errors.Is(err, os.ErrNotExist) && c.Fresh:
+	case errors.Is(err, os.ErrNotExist):
 		m.state = &stateFile{
 			Version:     metadataVersion,
-			Binding:     c.Binding,
 			TrustDomain: c.TrustDomain.IDString(),
 			JWT: authorityState{
 				Enabled: !c.DisableJWTSVIDs,
@@ -114,13 +108,11 @@ func NewManager(ctx context.Context, c Config) (*Manager, error) {
 		if err := m.persist("create token authority metadata", m.state); err != nil {
 			return nil, err
 		}
-	case errors.Is(err, os.ErrNotExist):
-		return nil, errors.New("token authority metadata is missing")
 	default:
 		return nil, err
 	}
 
-	if err := m.state.validate(m.c, m.keyPrefix); err != nil {
+	if err := m.state.validate(m.c); err != nil {
 		return nil, err
 	}
 	if err := m.applyConfig(); err != nil {
@@ -180,8 +172,6 @@ func validateConfig(c *Config) error {
 		return errors.New("trust domain is required")
 	case c.StateDir == "":
 		return errors.New("state directory is required")
-	case c.Binding == "":
-		return errors.New("binding is required")
 	case c.Log == nil:
 		return errors.New("logger is required")
 	case !c.DisableJWTSVIDs && c.JWTKeyType == keymanager.KeyTypeUnset:
@@ -504,7 +494,7 @@ func (m *Manager) prepare(ctx context.Context, kind authorityKind, activate bool
 		ID:       operationID,
 		Type:     operationPrepare,
 		Stage:    stageIntent,
-		KeyID:    m.keyPrefix + string(kind) + "-" + keyIdentity,
+		KeyID:    "token-authority-" + string(kind) + "-" + keyIdentity,
 		KID:      kid,
 		IssuedAt: now,
 		NotAfter: now.Add(m.keyTTL),
@@ -790,19 +780,19 @@ func (m *Manager) validateKnownKeys(ctx context.Context) error {
 		}
 	}
 
-	keys, err := m.c.KeyManager.GetKeys(ctx)
-	if err != nil {
-		return fmt.Errorf("list key manager keys: %w", err)
-	}
-	for _, key := range keys {
-		expected, ok := known[key.ID()]
-		if !ok {
-			return fmt.Errorf("unprovable unknown token authority key %q", key.ID())
+	for keyID, expected := range known {
+		if len(expected) == 0 {
+			continue
 		}
-		if ok && len(expected) > 0 {
-			if err := requirePublicKeyBinding(key, expected); err != nil {
-				return fmt.Errorf("token authority key %q has mismatched key binding: %w", key.ID(), err)
-			}
+		key, err := m.c.KeyManager.GetKey(ctx, keyID)
+		if status.Code(err) == codes.NotFound {
+			return fmt.Errorf("referenced token authority key %q is missing", keyID)
+		}
+		if err != nil {
+			return fmt.Errorf("load referenced token authority key %q: %w", keyID, err)
+		}
+		if err := requirePublicKeyBinding(key, expected); err != nil {
+			return fmt.Errorf("token authority key %q has mismatched key binding: %w", keyID, err)
 		}
 	}
 	return nil
@@ -887,15 +877,11 @@ func (m *Manager) bundleFor(kind authorityKind, pending *pendingOperation) *comm
 }
 
 func (m *Manager) persist(action string, next *stateFile) error {
-	if err := next.validate(m.c, m.keyPrefix); err != nil {
+	if err := next.validate(m.c); err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	data, err := marshalState(next)
 	if err != nil {
-		return fmt.Errorf("%s: %w", action, err)
-	}
-	if err := ensureNoPendingStateWrite(m.metadataPath); err != nil {
-		m.stateErr = fmt.Errorf("token authority metadata state is uncertain: %w", err)
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	if err := m.writeFile(m.metadataPath, data); err != nil {
@@ -908,13 +894,6 @@ func (m *Manager) persist(action string, next *stateFile) error {
 
 func (m *Manager) checkState() error {
 	return m.stateErr
-}
-
-func ensureNoPendingStateWrite(path string) error {
-	if _, err := os.Lstat(path + ".tmp"); err == nil || !errors.Is(err, os.ErrNotExist) {
-		return errors.New("ambiguous pending state write")
-	}
-	return nil
 }
 
 func (m *Manager) authority(kind authorityKind) *authorityState {
@@ -943,11 +922,6 @@ func (m *Manager) incrementActivation(kind authorityKind) {
 	case authorityWIT:
 		telemetry_server.IncrActivateWITKeyManagerCounter(m.c.Metrics)
 	}
-}
-
-func makeKeyPrefix(binding string, trustDomain spiffeid.TrustDomain) string {
-	sum := sha256.Sum256([]byte(binding + "\x00" + trustDomain.IDString()))
-	return "token-authority-" + base64.RawURLEncoding.EncodeToString(sum[:12]) + "-"
 }
 
 func newIdentity() (string, error) {

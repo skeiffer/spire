@@ -13,7 +13,6 @@ import (
 	"github.com/spiffe/spire-plugin-sdk/pluginsdk"
 	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
 	"github.com/spiffe/spire/pkg/server/credtemplate"
-	"github.com/spiffe/spire/pkg/server/externalstate"
 	host "github.com/spiffe/spire/pkg/server/plugin/x509svidissuer"
 	"github.com/spiffe/spire/test/clock"
 	"github.com/stretchr/testify/require"
@@ -31,7 +30,7 @@ func (missingBroker) BrokerClient(pluginsdk.ServiceClient) bool { return false }
 
 func TestFixtureRetainsRootsAndHonorsStagedOldVersion(t *testing.T) {
 	p, profile, request, now := issuerFixture(t)
-	require.NoError(t, externalstate.WriteJSON(filepath.Join(p.dir, "controls.json"), controls{Version: "v2"}))
+	require.NoError(t, writeJSON(filepath.Join(p.dir, "controls.json"), controls{Version: "v2"}))
 	response, err := p.IssueX509SVID(t.Context(), request)
 	require.NoError(t, err)
 	root, err := x509.ParseCertificate(p.roots["v1"].Root)
@@ -62,7 +61,7 @@ func TestFixtureRejectsUnboundProofAndCanShortenValidity(t *testing.T) {
 				require.Equal(t, codes.InvalidArgument, status.Code(err))
 				return
 			}
-			require.NoError(t, externalstate.WriteJSON(filepath.Join(p.dir, "controls.json"), controls{Version: "v1", ShortTTL: 1}))
+			require.NoError(t, writeJSON(filepath.Join(p.dir, "controls.json"), controls{Version: "v1", ShortTTL: 1}))
 			response, err := p.IssueX509SVID(t.Context(), request)
 			require.NoError(t, err)
 			root, err := x509.ParseCertificate(p.roots["v1"].Root)
@@ -79,7 +78,7 @@ func issuerFixture(t *testing.T) (*issuer, *x509.Certificate, *issuerv1.IssueX50
 	dir := t.TempDir()
 	material, err := loadMaterial(dir)
 	require.NoError(t, err)
-	require.NoError(t, externalstate.WriteJSON(filepath.Join(dir, "controls.json"), controls{Version: "v1"}))
+	require.NoError(t, writeJSON(filepath.Join(dir, "controls.json"), controls{Version: "v1"}))
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	now := time.Now().Truncate(time.Second)

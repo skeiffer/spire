@@ -44,28 +44,3 @@ func NewBundlePublisher(ds datastore.DataStore, trustDomainID string) PublishAut
 		return nil
 	}
 }
-
-func NewAuthorizedBundlePublisher(ds datastore.DataStore, trustDomainID string, retainedRoots [][]byte, knownRoot func([]byte) bool) PublishAuthoritiesFunc {
-	publish := NewBundlePublisher(ds, trustDomainID)
-	return func(ctx context.Context, roots []*x509.Certificate) error {
-		current, err := ds.FetchBundle(ctx, trustDomainID)
-		if err != nil {
-			return err
-		}
-		if current != nil {
-			for _, existing := range current.RootCas {
-				authorized := knownRoot != nil && knownRoot(existing.DerBytes)
-				for _, root := range roots {
-					authorized = authorized || bytes.Equal(existing.DerBytes, root.Raw)
-				}
-				for _, raw := range retainedRoots {
-					authorized = authorized || bytes.Equal(existing.DerBytes, raw)
-				}
-				if !authorized {
-					return errors.New("shared bundle contains unexplained X509 trust; provision retained trust authorization or restore its ledger")
-				}
-			}
-		}
-		return publish(ctx, roots)
-	}
-}
