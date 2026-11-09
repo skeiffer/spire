@@ -16,11 +16,12 @@ const (
 )
 
 type RotatorConfig struct {
-	Log      logrus.FieldLogger
-	Metrics  telemetry.Metrics
-	ServerCA ca.ServerCA
-	Clock    clock.Clock
-	KeyType  keymanager.KeyType
+	Log             logrus.FieldLogger
+	Metrics         telemetry.Metrics
+	ServerCA        ca.ServerCA
+	Clock           clock.Clock
+	KeyType         keymanager.KeyType
+	RequireProofCSR bool
 
 	// How long to wait between expiry checks
 	Interval time.Duration

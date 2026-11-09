@@ -2820,6 +2820,22 @@ func TestServiceBatchNewWITSVID(t *testing.T) {
 	}
 }
 
+func TestNewDownstreamX509CAModeErrorUsesExistingMapping(t *testing.T) {
+	test := setupServiceTest(t)
+	defer test.Cleanup()
+	test.withCallerID = true
+	test.rateLimiter.count = 1
+	test.downstream.entries = []*types.Entry{{
+		Id: "downstream", ParentId: api.ProtoFromID(agentID),
+		SpiffeId: api.ProtoFromID(td.ID()), Downstream: true,
+	}}
+	test.ca.SetError(status.Error(codes.FailedPrecondition, "downstream X509 CA signing is unavailable with an external X509-SVID issuer"))
+	_, err := test.client.NewDownstreamX509CA(t.Context(), &svidv1.NewDownstreamX509CARequest{
+		Csr: createCSR(t, new(x509.CertificateRequest)),
+	})
+	spiretest.RequireGRPCStatusContains(t, err, codes.Internal, "failed to sign downstream X.509 CA")
+}
+
 func TestNewDownstreamX509CA(t *testing.T) {
 	type downstreamCaTest struct {
 		name           string

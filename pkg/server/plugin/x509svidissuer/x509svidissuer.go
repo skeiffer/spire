@@ -5,21 +5,31 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"sync"
+	"strings"
 	"time"
 
 	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
 	"github.com/spiffe/spire/pkg/common/catalog"
+	"google.golang.org/protobuf/proto"
+)
+
+const (
+	maxCertificateSize = 16 << 10
+	maxSnapshotSize    = 64 << 10
+	maxResponseSize    = 256 << 10
+	maxCSRSize         = 32 << 10
+	maxPaths           = 8
+	maxPathDepth       = 8
+	maxHistory         = 64
 )
 
 var (
-	ErrVersionReused      = errors.New("authority version reused with different content")
-	ErrUnknownAuthority   = errors.New("unknown authority version")
-	ErrNoAuthorityOverlap = errors.New("authority activation has no trust-root overlap")
-	ErrRetentionWindow    = errors.New("authority retention window has not elapsed")
-	ErrAuthorityTainted   = errors.New("active authority is tainted")
+	ErrVersionReused    = errors.New("authority version reused with different content")
+	ErrUnknownAuthority = errors.New("unknown authority version")
+	ErrAuthorityTainted = errors.New("authority session is unavailable")
 )
 
 type X509SVIDIssuer interface {
@@ -28,170 +38,143 @@ type X509SVIDIssuer interface {
 	SubscribeAuthoritySnapshots(context.Context) (AuthoritySnapshotStream, error)
 }
 
-type AuthoritySnapshotStream interface {
-	Recv() (*issuerv1.AuthoritySnapshot, error)
+// AuthorityPath is ordered from the trust root to the issuing CA.
+type AuthorityPath struct {
+	Root          *x509.Certificate
+	Intermediates []*x509.Certificate
 }
 
 type Snapshot struct {
-	Version       string
-	Roots         []*x509.Certificate
-	Intermediates []*x509.Certificate
-	PublishedAt   time.Time
+	Version     string
+	Roots       []*x509.Certificate
+	Paths       []AuthorityPath
+	PublishedAt time.Time
 }
 
 type authorityRecord struct {
 	snapshot   Snapshot
 	digest     [32]byte
-	retainTill time.Time
-	taint      error
+	preparedAt time.Time
+	committed  bool
+	retired    bool
 }
 
+// AuthorityStore is serialized by its owning Host.
 type AuthorityStore struct {
-	mu        sync.RWMutex
-	clockSkew time.Duration
-	active    string
-	records   map[string]*authorityRecord
+	active  string
+	records map[string]*authorityRecord
 }
 
-func NewAuthorityStore(clockSkew time.Duration) *AuthorityStore {
-	return &AuthorityStore{clockSkew: clockSkew, records: make(map[string]*authorityRecord)}
+func NewAuthorityStore() *AuthorityStore {
+	return &AuthorityStore{records: make(map[string]*authorityRecord)}
 }
 
-func (s *AuthorityStore) Publish(snapshot Snapshot) error {
-	if snapshot.Version == "" || len(snapshot.Roots) == 0 {
-		return errors.New("authority version and roots are required")
-	}
-	h := sha256.New()
-	for _, cert := range append(append([]*x509.Certificate{}, snapshot.Roots...), snapshot.Intermediates...) {
-		if cert == nil {
-			return errors.New("authority snapshot contains nil certificate")
-		}
-		_, _ = h.Write(cert.Raw)
-	}
-	var digest [32]byte
-	copy(digest[:], h.Sum(nil))
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if previous, ok := s.records[snapshot.Version]; ok {
+func (s *AuthorityStore) publish(snapshot Snapshot, now time.Time) error {
+	digest := snapshotDigest(snapshot)
+	if previous := s.records[snapshot.Version]; previous != nil {
 		if previous.digest != digest {
 			return ErrVersionReused
 		}
 		return nil
 	}
-	s.records[snapshot.Version] = &authorityRecord{snapshot: cloneSnapshot(snapshot), digest: digest}
+	if len(s.records) >= maxHistory {
+		return errors.New("external authority history is full; provision a new server data directory and review retained trust before restarting")
+	}
+	s.records[snapshot.Version] = &authorityRecord{snapshot: snapshot, digest: digest, preparedAt: now}
 	return nil
 }
 
-func (s *AuthorityStore) Activate(version string, now time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	next, ok := s.records[version]
-	if !ok {
-		return ErrUnknownAuthority
-	}
-	if next.taint != nil {
-		return fmt.Errorf("%w: %w", ErrAuthorityTainted, next.taint)
-	}
-	for _, root := range next.snapshot.Roots {
-		if now.Before(root.NotBefore) || !now.Before(root.NotAfter) {
-			return errors.New("authority root is outside its validity window")
+func (s *AuthorityStore) selectActive(now time.Time, observed map[string]bool) {
+	current := s.records[s.active]
+	var expiry time.Time
+	if current != nil {
+		expiry = current.snapshot.effectiveExpiry(now)
+		if !expiry.IsZero() {
+			lifetime := expiry.Sub(current.preparedAt)
+			if now.Before(expiry.Add(-min(lifetime/6, 7*24*time.Hour))) {
+				return
+			}
 		}
 	}
-	if s.active != "" && s.active != version {
-		current := s.records[s.active]
-		if !hasRootOverlap(current.snapshot.Roots, next.snapshot.Roots) {
-			return ErrNoAuthorityOverlap
-		}
-		if current.retainTill.Before(now.Add(s.clockSkew)) {
-			current.retainTill = now.Add(s.clockSkew)
-		}
-	}
-	s.active = version
-	return nil
-}
-
-func (s *AuthorityStore) MarkIssued(version string, notAfter time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if record := s.records[version]; record != nil {
-		retainTill := notAfter.Add(s.clockSkew)
-		if record.retainTill.Before(retainTill) {
-			record.retainTill = retainTill
-		}
-	}
-}
-
-func (s *AuthorityStore) Remove(version string, now time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	record, ok := s.records[version]
-	if !ok {
-		return ErrUnknownAuthority
-	}
-	if version == s.active {
-		return errors.New("cannot remove active authority")
-	}
-	if now.Before(record.retainTill) {
-		return ErrRetentionWindow
-	}
-	delete(s.records, version)
-	return nil
-}
-
-func (s *AuthorityStore) Taint(version string, cause error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if record := s.records[version]; record != nil {
-		record.taint = cause
-	}
-}
-
-func (s *AuthorityStore) Active() (Snapshot, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	record := s.records[s.active]
-	if record == nil {
-		return Snapshot{}, ErrUnknownAuthority
-	}
-	if record.taint != nil {
-		return Snapshot{}, fmt.Errorf("%w: %w", ErrAuthorityTainted, record.taint)
-	}
-	return cloneSnapshot(record.snapshot), nil
-}
-
-func (s *AuthorityStore) ActiveVersion() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.active
-}
-
-func (s *AuthorityStore) BundleRoots(now time.Time) []*x509.Certificate {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var roots []*x509.Certificate
-	seen := make(map[string]struct{})
+	best := s.active
 	for version, record := range s.records {
-		if version != s.active && !now.Before(record.retainTill) {
+		if !record.committed || record.retired || !observed[version] {
 			continue
 		}
-		for _, root := range record.snapshot.Roots {
-			key := string(root.Raw)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			roots = append(roots, root)
+		nextExpiry := record.snapshot.effectiveExpiry(now)
+		// Expired current paths must not permit expiration regression.
+		floor := expiry
+		if current != nil && expiry.IsZero() {
+			floor = current.snapshot.latestExpiry(now)
+		}
+		if !nextExpiry.IsZero() && (current == nil || nextExpiry.After(floor)) &&
+			(best == s.active || nextExpiry.After(s.records[best].snapshot.effectiveExpiry(now)) ||
+				nextExpiry.Equal(s.records[best].snapshot.effectiveExpiry(now)) && version < best) {
+			best = version
 		}
 	}
-	return roots
+	if best != s.active {
+		if current != nil {
+			current.retired = true
+		}
+		s.active = best
+	}
+}
+
+func (s Snapshot) effectiveExpiry(now time.Time) time.Time {
+	var best time.Time
+	for _, path := range s.Paths {
+		expiry := path.Root.NotAfter
+		usable := true
+		for _, cert := range append([]*x509.Certificate{path.Root}, path.Intermediates...) {
+			if now.Before(cert.NotBefore) || !now.Before(cert.NotAfter) {
+				usable = false
+				break
+			}
+			if cert.NotAfter.Before(expiry) {
+				expiry = cert.NotAfter
+			}
+		}
+		if usable && expiry.After(best) {
+			best = expiry
+		}
+	}
+	return best
+}
+
+func (s Snapshot) latestExpiry(now time.Time) time.Time {
+	var best time.Time
+	for _, path := range s.Paths {
+		expiry := path.Root.NotAfter
+		notBefore := path.Root.NotBefore
+		for _, cert := range path.Intermediates {
+			if cert.NotAfter.Before(expiry) {
+				expiry = cert.NotAfter
+			}
+			if cert.NotBefore.After(notBefore) {
+				notBefore = cert.NotBefore
+			}
+		}
+		// Future paths must not prevent recovery from an expired active path.
+		if !now.Before(notBefore) && notBefore.Before(expiry) && expiry.After(best) {
+			best = expiry
+		}
+	}
+	return best
 }
 
 func SnapshotFromProto(in *issuerv1.AuthoritySnapshot) (Snapshot, error) {
-	if in == nil {
-		return Snapshot{}, errors.New("authority snapshot is nil")
+	if in == nil || proto.Size(in) > maxSnapshotSize {
+		return Snapshot{}, errors.New("authority snapshot is missing or exceeds size limit")
 	}
-	out := Snapshot{Version: in.GetAuthorityVersion()}
+	version := in.GetAuthorityVersion()
+	if strings.TrimSpace(version) == "" || len(version) > 256 {
+		return Snapshot{}, errors.New("authority version must contain between 1 and 256 bytes")
+	}
+	if len(in.GetAuthorityChains()) == 0 || len(in.GetAuthorityChains()) > maxPaths {
+		return Snapshot{}, errors.New("authority snapshot has an invalid number of paths")
+	}
+	out := Snapshot{Version: version}
 	if in.GetPublishedAt() != nil {
 		if err := in.GetPublishedAt().CheckValid(); err != nil {
 			return Snapshot{}, fmt.Errorf("invalid published_at: %w", err)
@@ -199,38 +182,67 @@ func SnapshotFromProto(in *issuerv1.AuthoritySnapshot) (Snapshot, error) {
 		out.PublishedAt = in.GetPublishedAt().AsTime()
 	}
 	for _, chain := range in.GetAuthorityChains() {
-		root, err := x509.ParseCertificate(chain.GetRoot())
+		if chain == nil || len(chain.GetIntermediates()) >= maxPathDepth {
+			return Snapshot{}, errors.New("authority path exceeds depth limit")
+		}
+		root, err := parseAuthorityCertificate(chain.GetRoot())
 		if err != nil {
 			return Snapshot{}, fmt.Errorf("parse authority root: %w", err)
 		}
-		if !root.IsCA || root.KeyUsage&x509.KeyUsageCertSign == 0 {
-			return Snapshot{}, errors.New("authority root is not a signing CA")
-		}
-		out.Roots = append(out.Roots, root)
-		for _, raw := range chain.GetIntermediates() {
-			cert, err := x509.ParseCertificate(raw)
+		path := AuthorityPath{Root: root}
+		parent := root
+		seen := map[string]bool{string(root.Raw): true}
+		for i, raw := range chain.GetIntermediates() {
+			cert, err := parseAuthorityCertificate(raw)
 			if err != nil {
 				return Snapshot{}, fmt.Errorf("parse authority intermediate: %w", err)
 			}
-			out.Intermediates = append(out.Intermediates, cert)
+			if seen[string(cert.Raw)] || !bytes.Equal(cert.RawIssuer, parent.RawSubject) {
+				return Snapshot{}, errors.New("authority path contains duplicate or unordered certificates")
+			}
+			if err := cert.CheckSignatureFrom(parent); err != nil {
+				return Snapshot{}, fmt.Errorf("invalid authority path signature: %w", err)
+			}
+			for j, ancestor := range append([]*x509.Certificate{root}, path.Intermediates...) {
+				if (ancestor.MaxPathLenZero || ancestor.MaxPathLen > 0) && i-j+1 > ancestor.MaxPathLen {
+					return Snapshot{}, errors.New("authority path exceeds CA path length constraint")
+				}
+			}
+			seen[string(cert.Raw)] = true
+			path.Intermediates = append(path.Intermediates, cert)
+			parent = cert
 		}
+		out.Roots = append(out.Roots, root)
+		out.Paths = append(out.Paths, path)
 	}
 	return out, nil
 }
 
-func cloneSnapshot(in Snapshot) Snapshot {
-	in.Roots = append([]*x509.Certificate(nil), in.Roots...)
-	in.Intermediates = append([]*x509.Certificate(nil), in.Intermediates...)
-	return in
+func parseAuthorityCertificate(raw []byte) (*x509.Certificate, error) {
+	if len(raw) == 0 || len(raw) > maxCertificateSize {
+		return nil, errors.New("authority certificate exceeds size limit or is empty")
+	}
+	cert, err := x509.ParseCertificate(bytes.Clone(raw))
+	if err != nil {
+		return nil, err
+	}
+	if !cert.IsCA || !cert.BasicConstraintsValid || cert.KeyUsage&x509.KeyUsageCertSign == 0 ||
+		!cert.NotAfter.After(cert.NotBefore) || len(cert.UnhandledCriticalExtensions) != 0 {
+		return nil, errors.New("authority certificate is not a valid signing CA")
+	}
+	return cert, nil
 }
 
-func hasRootOverlap(a, b []*x509.Certificate) bool {
-	for _, left := range a {
-		for _, right := range b {
-			if bytes.Equal(left.Raw, right.Raw) {
-				return true
-			}
+func snapshotDigest(snapshot Snapshot) [32]byte {
+	h := sha256.New()
+	for _, path := range snapshot.Paths {
+		_ = binary.Write(h, binary.BigEndian, int64(len(path.Intermediates)+1))
+		for _, cert := range append([]*x509.Certificate{path.Root}, path.Intermediates...) {
+			_ = binary.Write(h, binary.BigEndian, int64(len(cert.Raw)))
+			_, _ = h.Write(cert.Raw)
 		}
 	}
-	return false
+	var digest [32]byte
+	copy(digest[:], h.Sum(nil))
+	return digest
 }

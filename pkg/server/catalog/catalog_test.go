@@ -87,6 +87,37 @@ func Test(t *testing.T) {
 	}
 }
 
+func TestExternalIssuerPluginExclusion(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		issuerDisabled   bool
+		upstreamDisabled bool
+		conflict         bool
+	}{
+		{name: "both enabled", conflict: true},
+		{name: "issuer disabled", issuerDisabled: true},
+		{name: "upstream disabled", upstreamDisabled: true},
+		{name: "both disabled", issuerDisabled: true, upstreamDisabled: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			config := catalog.Config{PluginConfigs: catalog.PluginConfigs{
+				{Type: "X509SVIDIssuer", Name: "any-issuer", Disabled: tt.issuerDisabled},
+				{Type: "UpstreamAuthority", Name: "any-upstream", Disabled: tt.upstreamDisabled},
+			}}
+			// A conflict must be rejected even before the missing datastore
+			// and host services can cause configuration side effects.
+			_, err := catalog.Load(t.Context(), config)
+			if tt.conflict {
+				require.EqualError(t, err, "X509SVIDIssuer and UpstreamAuthority cannot both be enabled")
+				_, err = catalog.ValidateConfig(t.Context(), config)
+				require.EqualError(t, err, "X509SVIDIssuer and UpstreamAuthority cannot both be enabled")
+			} else {
+				require.EqualError(t, err, "expecting a DataStore plugin")
+			}
+		})
+	}
+}
+
 type fakeHealthChecker struct{}
 
 func (fakeHealthChecker) AddCheck(string, health.Checkable) error { return nil }

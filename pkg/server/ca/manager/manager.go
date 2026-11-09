@@ -1109,6 +1109,11 @@ func (m *Manager) selfSignX509CA(ctx context.Context, signer crypto.Signer) (*ca
 	}, nil
 }
 
+func (m *Manager) PublishX509Authorities(ctx context.Context, roots []*x509.Certificate) error {
+	_, err := m.appendBundle(ctx, roots, nil, nil)
+	return err
+}
+
 func (m *Manager) appendBundle(ctx context.Context, caChain []*x509.Certificate, jwtSigningKeys []*common.PublicKey, witSigningKeys []*common.PublicKey) (*common.Bundle, error) {
 	var rootCAs []*common.Certificate
 	for _, caCert := range caChain {

@@ -7,12 +7,14 @@ import (
 	"encoding/asn1"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -27,6 +29,9 @@ func BuildIssueRequest(template *x509.Certificate, proofCSR []byte, svidType iss
 	}
 	if strings.TrimSpace(authorityVersion) == "" {
 		return nil, errors.New("authority version is required")
+	}
+	if len(proofCSR) > maxCSRSize {
+		return nil, errors.New("proof CSR exceeds size limit")
 	}
 	if len(proofCSR) == 0 {
 		return nil, errors.New("proof CSR is required by configured external X509-SVID issuer")
@@ -48,7 +53,7 @@ func BuildIssueRequest(template *x509.Certificate, proofCSR []byte, svidType iss
 		return nil, fmt.Errorf("marshal profile subject: %w", err)
 	}
 	return &issuerv1.IssueX509SVIDRequest{
-		ProofCsr: proofCSR,
+		ProofCsr: bytes.Clone(proofCSR),
 		Profile: &issuerv1.X509SVIDProfile{
 			Type:              svidType,
 			SpiffeId:          template.URIs[0].String(),
@@ -66,11 +71,18 @@ func BuildIssueRequest(template *x509.Certificate, proofCSR []byte, svidType iss
 }
 
 func ParseAndValidateResponse(template *x509.Certificate, response *issuerv1.IssueX509SVIDResponse, snapshot Snapshot) ([]*x509.Certificate, error) {
+	return parseAndValidateResponse(template, response, snapshot, time.Now())
+}
+
+func parseAndValidateResponse(template *x509.Certificate, response *issuerv1.IssueX509SVIDResponse, snapshot Snapshot, now time.Time) ([]*x509.Certificate, error) {
 	if err := validateProfile(template); err != nil {
 		return nil, err
 	}
 	if response == nil {
 		return nil, errors.New("external issuer returned no response")
+	}
+	if proto.Size(response) > maxResponseSize || len(response.GetIntermediates()) >= maxPathDepth {
+		return nil, errors.New("external issuer response exceeds size or chain depth limit")
 	}
 	if response.GetAuthorityVersion() != snapshot.Version {
 		return nil, errors.New("external issuer returned mismatched authority version")
@@ -78,22 +90,83 @@ func ParseAndValidateResponse(template *x509.Certificate, response *issuerv1.Iss
 	if strings.TrimSpace(snapshot.Version) == "" || len(snapshot.Roots) == 0 {
 		return nil, errors.New("authority snapshot requires a version and trust roots")
 	}
-	leaf, err := x509.ParseCertificate(response.GetLeafCertificate())
+	if len(response.GetLeafCertificate()) > maxCertificateSize {
+		return nil, errors.New("external issuer leaf certificate exceeds size limit")
+	}
+	leaf, err := x509.ParseCertificate(bytes.Clone(response.GetLeafCertificate()))
 	if err != nil {
 		return nil, errors.New("external issuer returned malformed leaf certificate")
 	}
 	chain := []*x509.Certificate{leaf}
 	for _, raw := range response.GetIntermediates() {
-		cert, err := x509.ParseCertificate(raw)
+		if len(raw) > maxCertificateSize {
+			return nil, errors.New("external issuer intermediate certificate exceeds size limit")
+		}
+		cert, err := x509.ParseCertificate(bytes.Clone(raw))
 		if err != nil {
 			return nil, errors.New("external issuer returned malformed intermediate certificate")
 		}
 		chain = append(chain, cert)
 	}
-	if err := validateLeaf(template, leaf, chain[1:], snapshot.Roots); err != nil {
+	if err := validateLeaf(template, leaf, chain[1:], snapshot.Roots, now); err != nil {
 		return nil, fmt.Errorf("external issuer returned invalid X509-SVID: %w", err)
 	}
+	paths := snapshot.Paths
+	if len(paths) == 0 {
+		for _, root := range snapshot.Roots {
+			paths = append(paths, AuthorityPath{Root: root})
+		}
+	}
+	authorized := false
+	for _, path := range paths {
+		if len(path.Intermediates) != len(chain)-1 {
+			continue
+		}
+		match := true
+		for i, cert := range path.Intermediates {
+			if !cert.Equal(chain[len(chain)-1-i]) {
+				match = false
+				break
+			}
+		}
+		if match && verifyChain(leaf, chain[1:], []*x509.Certificate{path.Root}, now) == nil {
+			authorized = true
+			break
+		}
+	}
+	if !authorized {
+		return nil, errors.New("external issuer returned a chain outside the authorized authority paths")
+	}
 	return chain, nil
+}
+
+func cloneProfile(template *x509.Certificate) (*x509.Certificate, error) {
+	if err := validateProfile(template); err != nil {
+		return nil, err
+	}
+	out := *template
+	key, err := x509.MarshalPKIXPublicKey(template.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	out.PublicKey, err = x509.ParsePKIXPublicKey(key)
+	if err != nil {
+		return nil, err
+	}
+	out.RawSubject, err = profileSubject(template)
+	if err != nil {
+		return nil, err
+	}
+	id := *template.URIs[0]
+	out.URIs = []*url.URL{&id}
+	out.DNSNames = slices.Clone(template.DNSNames)
+	out.ExtKeyUsage = slices.Clone(template.ExtKeyUsage)
+	out.ExtraExtensions = slices.Clone(template.ExtraExtensions)
+	for i := range out.ExtraExtensions {
+		out.ExtraExtensions[i].Id = slices.Clone(out.ExtraExtensions[i].Id)
+		out.ExtraExtensions[i].Value = bytes.Clone(out.ExtraExtensions[i].Value)
+	}
+	return &out, nil
 }
 
 func validateProfile(template *x509.Certificate) error {
@@ -200,7 +273,7 @@ func toPluginExtensions(extensions []pkix.Extension) []*issuerv1.X509Extension {
 	return out
 }
 
-func validateLeaf(template, leaf *x509.Certificate, intermediates, roots []*x509.Certificate) error {
+func validateLeaf(template, leaf *x509.Certificate, intermediates, roots []*x509.Certificate, now time.Time) error {
 	templateKey, err := x509.MarshalPKIXPublicKey(template.PublicKey)
 	if err != nil {
 		return err
@@ -271,6 +344,10 @@ func validateLeaf(template, leaf *x509.Certificate, intermediates, roots []*x509
 		leaf.NotAfter.After(template.NotAfter.Truncate(time.Second)) || !leaf.NotAfter.After(leaf.NotBefore) {
 		return errors.New("certificate validity exceeds authoritative profile")
 	}
+	return verifyChain(leaf, intermediates, roots, now)
+}
+
+func verifyChain(leaf *x509.Certificate, intermediates, roots []*x509.Certificate, now time.Time) error {
 	rootPool := x509.NewCertPool()
 	for _, root := range roots {
 		if root == nil {
@@ -284,6 +361,7 @@ func validateLeaf(template, leaf *x509.Certificate, intermediates, roots []*x509
 	}
 	verified, err := leaf.Verify(x509.VerifyOptions{
 		Roots: rootPool, Intermediates: intermediatePool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+		CurrentTime: now,
 	})
 	if err != nil {
 		return fmt.Errorf("chain validation failed: %w", err)

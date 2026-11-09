@@ -112,6 +112,7 @@ func (s *RotatorTestSuite) TestRotationSucceeds() {
 }
 
 func (s *RotatorTestSuite) TestRotationConstructsProofCSR() {
+	s.r.c.RequireProofCSR = true
 	err := s.r.Initialize(context.Background())
 	s.Require().NoError(err)
 
@@ -127,6 +128,11 @@ func (s *RotatorTestSuite) TestRotationConstructsProofCSR() {
 	paramsPublicKey, err := x509.MarshalPKIXPublicKey(params.PublicKey)
 	s.Require().NoError(err)
 	s.Equal(paramsPublicKey, csrPublicKey)
+}
+
+func (s *RotatorTestSuite) TestNativeRotationDoesNotConstructProofCSR() {
+	s.Require().NoError(s.r.Initialize(context.Background()))
+	s.Empty(s.serverCA.LastServerX509SVIDParams().ProofCSR)
 }
 
 func (s *RotatorTestSuite) TestForceRotation() {

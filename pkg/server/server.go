@@ -204,26 +204,43 @@ func (s *Server) run(ctx context.Context) (err error) {
 		return err
 	}
 
-	issuer, err := s.newX509SVIDIssuer(ctx, cat, healthChecker)
-	if err != nil {
-		return err
+	var caManager *manager.Manager
+	issuer := s.newX509SVIDIssuer(cat, healthChecker, func(ctx context.Context, roots []*x509.Certificate) error {
+		return caManager.PublishX509Authorities(ctx, roots)
+	})
+	if issuer != nil {
+		defer issuer.Close()
 	}
-	serverCA := s.newCA(metrics, credBuilder, credValidator, healthChecker, issuer)
+	var leafIssuer x509svidissuer.Issuer
+	if issuer != nil {
+		leafIssuer = issuer
+	}
+	serverCA := s.newCA(metrics, credBuilder, credValidator, healthChecker, leafIssuer)
 
 	// CA manager needs to be initialized before the rotator, otherwise the
 	// server CA plugin won't be able to sign CSRs
-	caManager, err := s.newCAManager(ctx, cat, metrics, serverCA, credBuilder, credValidator)
+	caManager, err = s.newCAManager(ctx, cat, metrics, serverCA, credBuilder, credValidator)
 	if err != nil {
 		return err
 	}
-	defer caManager.Close()
+	defer func() {
+		if issuer != nil {
+			issuer.Close()
+		}
+		caManager.Close()
+	}()
 
 	caSync, err := s.newCASync(ctx, healthChecker, caManager)
 	if err != nil {
 		return err
 	}
+	if issuer != nil {
+		if err := issuer.Initialize(ctx); err != nil {
+			return err
+		}
+	}
 
-	svidRotator, err = s.newSVIDRotator(ctx, serverCA, metrics)
+	svidRotator, err = s.newSVIDRotator(ctx, serverCA, metrics, issuer != nil)
 	if err != nil {
 		return err
 	}
@@ -408,23 +425,21 @@ func (s *Server) newCA(metrics telemetry.Metrics, credBuilder *credtemplate.Buil
 	})
 }
 
-func (s *Server) newX509SVIDIssuer(ctx context.Context, cat catalog.Catalog, healthChecker health.Checker) (x509svidissuer.Issuer, error) {
+func (s *Server) newX509SVIDIssuer(cat catalog.Catalog, healthChecker health.Checker, publish x509svidissuer.PublishAuthoritiesFunc) *x509svidissuer.Host {
 	plugin, ok := cat.GetX509SVIDIssuer()
 	if !ok {
-		return nil, nil
+		return nil
 	}
 	host := x509svidissuer.NewHost(x509svidissuer.HostConfig{
 		Plugin:             plugin,
-		PublishAuthorities: x509svidissuer.NewBundlePublisher(cat.GetDataStore(), s.config.TrustDomain.IDString()),
+		PublishAuthorities: x509svidissuer.NewBundlePublisher(cat.GetDataStore(), s.config.TrustDomain.IDString(), publish),
+		DataDir:            s.config.DataDir,
 		OnError: func(err error) {
 			s.config.Log.WithError(err).Error("External X509-SVID issuer authority state failed")
 		},
 		HealthChecker: healthChecker,
 	})
-	if err := host.Initialize(ctx); err != nil {
-		return nil, err
-	}
-	return host, nil
+	return host
 }
 
 func (s *Server) newCAManager(ctx context.Context, cat catalog.Catalog, metrics telemetry.Metrics, serverCA *ca.CA, credBuilder *credtemplate.Builder, credValidator *credvalidator.Validator) (*manager.Manager, error) {
@@ -484,12 +499,13 @@ func (s *Server) newNodeManager(cat catalog.Catalog, metrics telemetry.Metrics) 
 	return nodeManager
 }
 
-func (s *Server) newSVIDRotator(ctx context.Context, serverCA ca.ServerCA, metrics telemetry.Metrics) (*svid.Rotator, error) {
+func (s *Server) newSVIDRotator(ctx context.Context, serverCA ca.ServerCA, metrics telemetry.Metrics, requireProofCSR bool) (*svid.Rotator, error) {
 	svidRotator := svid.NewRotator(&svid.RotatorConfig{
-		ServerCA: serverCA,
-		Log:      s.config.Log.WithField(telemetry.SubsystemName, telemetry.SVIDRotator),
-		Metrics:  metrics,
-		KeyType:  s.config.CAKeyType,
+		ServerCA:        serverCA,
+		Log:             s.config.Log.WithField(telemetry.SubsystemName, telemetry.SVIDRotator),
+		Metrics:         metrics,
+		KeyType:         s.config.CAKeyType,
+		RequireProofCSR: requireProofCSR,
 	})
 	if err := svidRotator.Initialize(ctx); err != nil {
 		return nil, err

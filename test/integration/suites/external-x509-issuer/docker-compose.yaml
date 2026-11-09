@@ -10,6 +10,10 @@ services:
     hostname: external-server
     environment:
       SPIRE_TEST_ISSUER_FAILURE_FILE: /opt/spire/conf/server/fail-issuance
+      SPIRE_TEST_ISSUER_STREAM_FAILURE_FILE: /opt/spire/conf/server/fail-stream
+      SPIRE_TEST_ISSUER_ROLLOVER_FILE: /opt/spire/conf/server/prepare-successor
+      SPIRE_TEST_ISSUER_STATE_DIR: /opt/spire/data/provider
+      SPIRE_TEST_ISSUER_ROOT_TTL: 2m
     volumes:
       - ./conf/server:/opt/spire/conf/server:ro
     command: ["-config", "/opt/spire/conf/server/external.conf"]

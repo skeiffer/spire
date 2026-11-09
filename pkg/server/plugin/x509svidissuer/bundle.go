@@ -1,23 +1,35 @@
 package x509svidissuer
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
+	"errors"
+	"slices"
 
 	"github.com/spiffe/spire/pkg/server/datastore"
 	"github.com/spiffe/spire/proto/spire/common"
 )
 
-func NewBundlePublisher(ds datastore.DataStore, trustDomainID string) PublishAuthoritiesFunc {
+func NewBundlePublisher(ds datastore.DataStore, trustDomainID string, publish PublishAuthoritiesFunc) PublishAuthoritiesFunc {
 	return func(ctx context.Context, roots []*x509.Certificate) error {
-		bundle := &common.Bundle{
-			TrustDomainId: trustDomainID,
-			RootCas:       make([]*common.Certificate, 0, len(roots)),
+		if err := publish(ctx, roots); err != nil {
+			return err
+		}
+		bundle, err := ds.FetchBundle(ctx, trustDomainID)
+		if err != nil {
+			return err
+		}
+		if bundle == nil {
+			return errors.New("external authority publication read-back returned no bundle")
 		}
 		for _, root := range roots {
-			bundle.RootCas = append(bundle.RootCas, &common.Certificate{DerBytes: root.Raw})
+			if !slices.ContainsFunc(bundle.RootCas, func(cert *common.Certificate) bool {
+				return cert != nil && bytes.Equal(cert.DerBytes, root.Raw)
+			}) {
+				return errors.New("external authority publication read-back is missing a root")
+			}
 		}
-		_, err := ds.AppendBundle(ctx, bundle)
-		return err
+		return nil
 	}
 }

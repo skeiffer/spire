@@ -1493,6 +1493,41 @@ func TestRunNotifiesBundleLoaded(t *testing.T) {
 	spiretest.RequireProtoEqual(t, expected, actual)
 }
 
+func TestExternalAuthoritiesUseNativeBundleNotifications(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	test := setupTest(t)
+	test.initAndActivateSelfSignedManager(ctx)
+	before := proto.Clone(test.fetchBundle(ctx)).(*common.Bundle)
+	external := testca.New(t, testTrustDomain)
+	require.NoError(t, test.m.PublishX509Authorities(ctx, external.X509Authorities()))
+	after := test.fetchBundle(ctx)
+	require.Equal(t, before.JwtSigningKeys, after.JwtSigningKeys)
+	require.Equal(t, before.WitSigningKeys, after.WitSigningKeys)
+	require.Len(t, after.RootCas, len(before.RootCas)+1)
+
+	var loaded *common.Bundle
+	test.setNotifier(fakenotifier.New(t, fakenotifier.Config{
+		OnNotifyAndAdviseBundleLoaded: func(bundle *common.Bundle) error {
+			loaded = bundle
+			return nil
+		},
+	}))
+	require.NoError(t, test.m.NotifyBundleLoaded(ctx))
+	spiretest.RequireProtoEqual(t, after, loaded)
+
+	notifier, notifyCh := fakenotifier.NotifyBundleUpdatedWaiter(t)
+	test.setNotifier(notifier)
+	test.m.dropBundleUpdated()
+	done := make(chan struct{})
+	go func() { defer close(done); test.m.ProcessBundleUpdates(ctx) }()
+	defer func() { cancel(); <-done }()
+	second := testca.New(t, testTrustDomain)
+	require.NoError(t, test.m.PublishX509Authorities(ctx, second.X509Authorities()))
+	test.waitForBundleUpdatedNotification(ctx, notifyCh)
+	require.Len(t, test.fetchBundle(ctx).RootCas, len(before.RootCas)+2)
+}
+
 func TestRunFailsIfNotifierFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()

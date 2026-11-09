@@ -4,10 +4,17 @@ Runs an ordinary Agent and workload against both the default signer and the
 optional external leaf issuer. The check verifies the identity, private-key/public-key
 match, chain against the delivered bundle, issuer, and workload renewal.
 Successful Agent admission and server startup also exercise their leaf paths.
+The check also cryptographically validates a native JWT-SVID and requires the
+native root to remain alongside external trust.
 
 The external server launches the generic `test/fixture/x509svidissuer` plugin.
 After successful issuance, a fixture-only file control makes a fresh admin mint
 fail. This is a new CSR/RPC, not a cached workload credential.
+The same suite prepares a disjoint-root successor, waits for automatic
+activation, restarts with retained host and provider state, and exercises
+snapshot stream loss and recovery. Provider private material lives separately
+from the host's public metadata; fixed versions retain the same certificates
+across process restart.
 
 Prerequisites: the pinned issuer SDK dependency, Linux Docker Compose, the normal
 `spire-server:latest-local` and `spire-agent:latest-local` test images, and Go

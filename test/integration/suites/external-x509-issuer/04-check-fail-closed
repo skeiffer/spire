@@ -10,3 +10,15 @@ docker compose logs external-server > server-output.log
 grep -q "fixture issuance disabled" server-output.log \
     || fail-now "mint failed for a reason other than the injected issuer error"
 log-success "fresh issuance failed closed without local fallback"
+docker compose exec -T external-agent /opt/spire/conf/agent/check-issuer -tokens-only
+rm conf/server/fail-issuance
+
+touch conf/server/fail-stream
+check-log-line external-server "fixture snapshot stream disabled"
+docker compose exec -T external-agent /opt/spire/conf/agent/check-issuer -tokens-only
+if docker compose exec -T external-server /opt/spire/bin/spire-server \
+    x509 mint -spiffeID spiffe://domain.test/fresh-session-request > session-mint-output.log 2>&1; then
+    fail-now "lost authority session allowed fresh issuance"
+fi
+rm conf/server/fail-stream
+docker compose exec -T external-agent /opt/spire/conf/agent/check-issuer -external -successor -renew

@@ -2,3 +2,11 @@
 
 docker compose exec -T default-agent /opt/spire/conf/agent/check-issuer -renew
 docker compose exec -T external-agent /opt/spire/conf/agent/check-issuer -external -renew
+
+# The successor is disjoint and must be prepared before automatic activation.
+touch conf/server/prepare-successor
+docker compose exec -T external-agent /opt/spire/conf/agent/check-issuer -external -successor
+
+# Restart the server and its child plugin without replacing either state store.
+docker-spire-server-restart external-server
+docker compose exec -T external-agent /opt/spire/conf/agent/check-issuer -external -successor -renew

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
 	"github.com/stretchr/testify/require"
@@ -25,4 +26,17 @@ func TestIssuanceFailureControl(t *testing.T) {
 	_, err = p.IssueX509SVID(context.Background(), req)
 	require.Equal(t, codes.Unavailable, status.Code(err))
 	require.Contains(t, err.Error(), "fixture issuance disabled")
+}
+
+func TestProviderStateSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	first, err := loadAuthorities(dir, time.Hour)
+	require.NoError(t, err)
+	second, err := loadAuthorities(dir, time.Hour)
+	require.NoError(t, err)
+	for version, authority := range first {
+		require.Equal(t, authority.cert.Raw, second[version].cert.Raw)
+		require.True(t, authority.key.Equal(second[version].key))
+	}
+	require.NotEqual(t, first[authorityVersion].cert.Raw, first[successorVersion].cert.Raw)
 }

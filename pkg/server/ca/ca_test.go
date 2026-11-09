@@ -27,6 +27,8 @@ import (
 	"github.com/spiffe/spire/test/fakes/fakehealthchecker"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -555,6 +557,7 @@ func (s *CATestSuite) TestExternalX509SVIDIssuerDispatch() {
 
 	for _, testCase := range testCases {
 		s.Run(testCase.name, func() {
+			s.ca.SetX509CA(nil)
 			proof := []byte("proof forwarded to issuer")
 			issuerErr := errors.New("issuer unavailable")
 			for _, fail := range []bool{false, true} {
@@ -565,6 +568,8 @@ func (s *CATestSuite) TestExternalX509SVIDIssuerDispatch() {
 					s.Equal(ctx, callCtx)
 					s.Equal(proof, gotProof)
 					s.Equal(testCase.svidType, gotType)
+					s.Empty(template.AuthorityKeyId)
+					s.True(template.NotAfter.After(s.clock.Now()))
 					if fail {
 						return nil, issuerErr
 					}
@@ -591,6 +596,24 @@ func (s *CATestSuite) TestExternalX509SVIDIssuerDispatch() {
 }
 
 type issuerFunc func(context.Context, *x509.Certificate, []byte, x509svidissuer.SVIDType) ([]*x509.Certificate, error)
+
+func (f issuerFunc) CheckHealth() health.State {
+	return health.State{Live: true, Ready: false}
+}
+
+func (s *CATestSuite) TestExternalIssuerHealthAndDownstreamDoNotSign() {
+	calls := 0
+	s.ca.c.X509SVIDIssuer = issuerFunc(func(context.Context, *x509.Certificate, []byte, x509svidissuer.SVIDType) ([]*x509.Certificate, error) {
+		calls++
+		return nil, errors.New("unexpected issuance")
+	})
+	s.ca.SetX509CA(nil)
+	h := &caHealth{ca: s.ca, td: trustDomainExample, issuer: s.ca.c.X509SVIDIssuer}
+	s.Equal(health.State{Live: true, Ready: false}, h.CheckHealth())
+	_, err := s.ca.SignDownstreamX509CA(ctx, DownstreamX509CAParams{})
+	s.Equal(codes.FailedPrecondition, status.Code(err))
+	s.Zero(calls)
+}
 
 func (f issuerFunc) Issue(ctx context.Context, template *x509.Certificate, proof []byte, svidType x509svidissuer.SVIDType) ([]*x509.Certificate, error) {
 	return f(ctx, template, proof, svidType)

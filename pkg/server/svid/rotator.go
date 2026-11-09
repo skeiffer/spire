@@ -134,9 +134,12 @@ func (r *Rotator) rotateSVID(ctx context.Context) (err error) {
 		return err
 	}
 
-	proofCSR, err := x509.CreateCertificateRequest(rand.Reader, new(x509.CertificateRequest), signer)
-	if err != nil {
-		return err
+	var proofCSR []byte
+	if r.c.RequireProofCSR {
+		proofCSR, err = x509.CreateCertificateRequest(rand.Reader, new(x509.CertificateRequest), signer)
+		if err != nil {
+			return err
+		}
 	}
 
 	svid, err := r.c.ServerCA.SignServerX509SVID(ctx, ca.ServerX509SVIDParams{

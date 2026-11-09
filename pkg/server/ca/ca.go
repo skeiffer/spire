@@ -24,6 +24,8 @@ import (
 	"github.com/spiffe/spire/pkg/server/credtemplate"
 	"github.com/spiffe/spire/pkg/server/credvalidator"
 	"github.com/spiffe/spire/pkg/server/plugin/x509svidissuer"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -205,8 +207,9 @@ func NewCA(config Config) *CA {
 	}
 
 	_ = config.HealthChecker.AddCheck("server.ca", &caHealth{
-		ca: ca,
-		td: config.TrustDomain,
+		ca:     ca,
+		td:     config.TrustDomain,
+		issuer: config.X509SVIDIssuer,
 	})
 
 	return ca
@@ -268,6 +271,9 @@ func (ca *CA) TaintedAuthorities() <-chan []*x509.Certificate {
 }
 
 func (ca *CA) SignDownstreamX509CA(ctx context.Context, params DownstreamX509CAParams) ([]*x509.Certificate, error) {
+	if ca.c.X509SVIDIssuer != nil {
+		return nil, status.Error(codes.FailedPrecondition, "downstream X509 CA signing is unavailable with an external X509-SVID issuer")
+	}
 	x509CA, caChain, err := ca.getX509CA()
 	if err != nil {
 		return nil, err
@@ -297,15 +303,16 @@ func (ca *CA) SignDownstreamX509CA(ctx context.Context, params DownstreamX509CAP
 }
 
 func (ca *CA) SignServerX509SVID(ctx context.Context, params ServerX509SVIDParams) ([]*x509.Certificate, error) {
-	x509CA, caChain, err := ca.getX509CA()
+	x509CA, caChain, err := ca.getLeafParent()
 	if err != nil {
 		return nil, err
 	}
 
 	template, err := ca.c.CredBuilder.BuildServerX509SVIDTemplate(ctx, credtemplate.ServerX509SVIDParams{
-		ParentChain:   caChain,
-		PublicKey:     params.PublicKey,
-		ExpirationCap: x509CA.NotAfter,
+		ExternalIssuer: ca.c.X509SVIDIssuer != nil,
+		ParentChain:    caChain,
+		PublicKey:      params.PublicKey,
+		ExpirationCap:  x509CA.NotAfter,
 	})
 	if err != nil {
 		return nil, err
@@ -324,16 +331,17 @@ func (ca *CA) SignServerX509SVID(ctx context.Context, params ServerX509SVIDParam
 }
 
 func (ca *CA) SignAgentX509SVID(ctx context.Context, params AgentX509SVIDParams) ([]*x509.Certificate, error) {
-	x509CA, caChain, err := ca.getX509CA()
+	x509CA, caChain, err := ca.getLeafParent()
 	if err != nil {
 		return nil, err
 	}
 
 	template, err := ca.c.CredBuilder.BuildAgentX509SVIDTemplate(ctx, credtemplate.AgentX509SVIDParams{
-		ParentChain:   caChain,
-		PublicKey:     params.PublicKey,
-		SPIFFEID:      params.SPIFFEID,
-		ExpirationCap: x509CA.NotAfter,
+		ExternalIssuer: ca.c.X509SVIDIssuer != nil,
+		ParentChain:    caChain,
+		PublicKey:      params.PublicKey,
+		SPIFFEID:       params.SPIFFEID,
+		ExpirationCap:  x509CA.NotAfter,
 	})
 	if err != nil {
 		return nil, err
@@ -352,19 +360,20 @@ func (ca *CA) SignAgentX509SVID(ctx context.Context, params AgentX509SVIDParams)
 }
 
 func (ca *CA) SignWorkloadX509SVID(ctx context.Context, params WorkloadX509SVIDParams) ([]*x509.Certificate, error) {
-	x509CA, caChain, err := ca.getX509CA()
+	x509CA, caChain, err := ca.getLeafParent()
 	if err != nil {
 		return nil, err
 	}
 
 	template, err := ca.c.CredBuilder.BuildWorkloadX509SVIDTemplate(ctx, credtemplate.WorkloadX509SVIDParams{
-		ParentChain:   caChain,
-		PublicKey:     params.PublicKey,
-		SPIFFEID:      params.SPIFFEID,
-		DNSNames:      params.DNSNames,
-		TTL:           params.TTL,
-		Subject:       params.Subject,
-		ExpirationCap: x509CA.NotAfter,
+		ExternalIssuer: ca.c.X509SVIDIssuer != nil,
+		ParentChain:    caChain,
+		PublicKey:      params.PublicKey,
+		SPIFFEID:       params.SPIFFEID,
+		DNSNames:       params.DNSNames,
+		TTL:            params.TTL,
+		Subject:        params.Subject,
+		ExpirationCap:  x509CA.NotAfter,
 	})
 	if err != nil {
 		return nil, err
@@ -443,6 +452,13 @@ func (ca *CA) SignWorkloadWITSVID(ctx context.Context, params WorkloadWITSVIDPar
 	}
 
 	return token, nil
+}
+
+func (ca *CA) getLeafParent() (*X509CA, []*x509.Certificate, error) {
+	if ca.c.X509SVIDIssuer != nil {
+		return &X509CA{}, nil, nil
+	}
+	return ca.getX509CA()
 }
 
 func (ca *CA) getX509CA() (*X509CA, []*x509.Certificate, error) {

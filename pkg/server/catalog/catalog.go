@@ -145,6 +145,9 @@ func (repo *Repository) Close() {
 }
 
 func Load(ctx context.Context, config Config) (_ *Repository, err error) {
+	if err := validatePluginCombinations(config.PluginConfigs); err != nil {
+		return nil, err
+	}
 	if c, ok := config.PluginConfigs.Find(nodeAttestorType, jointoken.PluginName); ok && c.IsEnabled() && c.IsExternal() {
 		return nil, errors.New("the built-in join_token node attestor cannot be overridden by an external plugin")
 	}
@@ -200,6 +203,9 @@ func Load(ctx context.Context, config Config) (_ *Repository, err error) {
 }
 
 func ValidateConfig(ctx context.Context, config Config) (pluginNotes map[string][]string, err error) {
+	if err := validatePluginCombinations(config.PluginConfigs); err != nil {
+		return nil, err
+	}
 	if c, ok := config.PluginConfigs.Find(nodeAttestorType, jointoken.PluginName); ok && c.IsEnabled() && c.IsExternal() {
 		return nil, errors.New("the built-in join_token node attestor cannot be overridden by an external plugin")
 	}
@@ -254,6 +260,25 @@ func ValidateConfig(ctx context.Context, config Config) (pluginNotes map[string]
 	}
 
 	return pluginNotes, err
+}
+
+func validatePluginCombinations(configs catalog.PluginConfigs) error {
+	var issuer, upstream bool
+	for _, config := range configs {
+		if !config.IsEnabled() {
+			continue
+		}
+		switch config.Type {
+		case x509SVIDIssuerType:
+			issuer = true
+		case upstreamAuthorityType:
+			upstream = true
+		}
+	}
+	if issuer && upstream {
+		return errors.New("X509SVIDIssuer and UpstreamAuthority cannot both be enabled")
+	}
+	return nil
 }
 
 func loadSQLDataStore(ctx context.Context, config Config, coreConfig catalog.CoreConfig, datastoreConfigs catalog.PluginConfigs) (*ds_sql.Plugin, error) {

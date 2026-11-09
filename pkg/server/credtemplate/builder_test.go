@@ -63,6 +63,41 @@ func TestNewBuilderRequiresTrustDomain(t *testing.T) {
 	assert.EqualError(t, err, "trust domain must be set")
 }
 
+func TestExternalLeafProfilesIgnoreLocalParent(t *testing.T) {
+	builder, err := credtemplate.NewBuilder(credtemplate.Config{TrustDomain: td, Clock: clock.NewMockAt(t, now)})
+	require.NoError(t, err)
+	expired := []*x509.Certificate{{NotAfter: now.Add(-time.Hour), SubjectKeyId: []byte("unrelated")}}
+	for _, tt := range []struct {
+		name  string
+		build func(bool, []*x509.Certificate) (*x509.Certificate, error)
+	}{
+		{name: "server", build: func(external bool, parent []*x509.Certificate) (*x509.Certificate, error) {
+			return builder.BuildServerX509SVIDTemplate(ctx, credtemplate.ServerX509SVIDParams{ExternalIssuer: external, ParentChain: parent, PublicKey: publicKey, ExpirationCap: now.Add(-time.Minute)})
+		}},
+		{name: "agent", build: func(external bool, parent []*x509.Certificate) (*x509.Certificate, error) {
+			return builder.BuildAgentX509SVIDTemplate(ctx, credtemplate.AgentX509SVIDParams{ExternalIssuer: external, ParentChain: parent, PublicKey: publicKey, SPIFFEID: agentID, ExpirationCap: now.Add(-time.Minute)})
+		}},
+		{name: "workload", build: func(external bool, parent []*x509.Certificate) (*x509.Certificate, error) {
+			return builder.BuildWorkloadX509SVIDTemplate(ctx, credtemplate.WorkloadX509SVIDParams{ExternalIssuer: external, ParentChain: parent, PublicKey: publicKey, SPIFFEID: workloadID, ExpirationCap: now.Add(-time.Minute)})
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, parent := range [][]*x509.Certificate{nil, expired} {
+				template, err := tt.build(true, parent)
+				require.NoError(t, err)
+				require.Equal(t, x509SVIDNotAfter, template.NotAfter)
+				require.Empty(t, template.AuthorityKeyId)
+			}
+			_, err := tt.build(false, nil)
+			require.ErrorContains(t, err, "parent chain required")
+			template, err := tt.build(false, expired)
+			require.NoError(t, err)
+			require.Equal(t, expired[0].NotAfter, template.NotAfter)
+			require.Equal(t, expired[0].SubjectKeyId, template.AuthorityKeyId)
+		})
+	}
+}
+
 func TestNewBuilderSetsDefaults(t *testing.T) {
 	builder, err := credtemplate.NewBuilder(credtemplate.Config{
 		TrustDomain: td,

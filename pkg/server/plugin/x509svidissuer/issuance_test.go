@@ -400,7 +400,9 @@ func TestResponseChainAndMalformedData(t *testing.T) {
 				LeafCertificate: leaf.Raw, Intermediates: [][]byte{second.Raw, first.Raw}, AuthorityVersion: "v1",
 			}
 			response = tt.mutate(response, []*x509.Certificate{f.root, first, second, unused})
-			chain, err := ParseAndValidateResponse(f.template, response, f.snapshot())
+			snapshot := f.snapshot()
+			snapshot.Paths = []AuthorityPath{{Root: f.root, Intermediates: []*x509.Certificate{first, second}}}
+			chain, err := ParseAndValidateResponse(f.template, response, snapshot)
 			if tt.want == "" {
 				require.NoError(t, err)
 				require.Len(t, chain, 3)
@@ -416,6 +418,40 @@ func TestResponseChainAndMalformedData(t *testing.T) {
 		_, err := ParseAndValidateResponse(f.template, f.response(t, nil), other.snapshot())
 		require.ErrorContains(t, err, "chain validation failed")
 	})
+}
+
+func TestResponseRejectsUnadvertisedIntermediate(t *testing.T) {
+	f := newIssuanceFixture(t)
+	key := newECDSAKey(t)
+	intermediate := f.signingCA(t, "unadvertised", f.root, f.rootKey, key)
+	leaf := createCertificate(t, f.template, intermediate, f.template.PublicKey, key)
+	_, err := ParseAndValidateResponse(f.template, &issuerv1.IssueX509SVIDResponse{
+		LeafCertificate: leaf.Raw, Intermediates: [][]byte{intermediate.Raw}, AuthorityVersion: "v1",
+	}, f.snapshot())
+	require.ErrorContains(t, err, "outside the authorized authority paths")
+}
+
+func TestResponseCannotMixAuthorityPathsWithSharedKeys(t *testing.T) {
+	f := newIssuanceFixture(t)
+	rootTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(999), Subject: pkix.Name{CommonName: "other root using same key"},
+		NotBefore: f.root.NotBefore, NotAfter: f.root.NotAfter,
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	other := createCertificate(t, rootTemplate, rootTemplate, f.rootKey.Public(), f.rootKey)
+	key := newECDSAKey(t)
+	intermediate := f.signingCA(t, "advertised issuer", other, f.rootKey, key)
+	// This leaf verifies against the combined root pool, but neither advertised
+	// path authorizes direct issuance by the second root.
+	leaf := createCertificate(t, f.template, other, f.template.PublicKey, f.rootKey)
+	snapshot := Snapshot{
+		Version: "v1", Roots: []*x509.Certificate{f.root, other},
+		Paths: []AuthorityPath{{Root: f.root}, {Root: other, Intermediates: []*x509.Certificate{intermediate}}},
+	}
+	_, err := ParseAndValidateResponse(f.template, &issuerv1.IssueX509SVIDResponse{
+		AuthorityVersion: "v1", LeafCertificate: leaf.Raw,
+	}, snapshot)
+	require.ErrorContains(t, err, "outside the authorized authority paths")
 }
 
 type issuanceFixture struct {

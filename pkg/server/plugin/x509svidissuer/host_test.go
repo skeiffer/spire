@@ -13,6 +13,9 @@ import (
 	"time"
 
 	issuerv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/x509svidissuer/v1"
+	"github.com/spiffe/spire/pkg/server/datastore"
+	"github.com/spiffe/spire/proto/spire/common"
+	"github.com/spiffe/spire/test/clock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -36,13 +39,15 @@ func TestHostInitializesPublishesAndIssues(t *testing.T) {
 	plugin := &testPlugin{stream: stream}
 	var published []*x509.Certificate
 	host := NewHost(HostConfig{
-		Plugin: plugin,
+		Plugin:  plugin,
+		DataDir: t.TempDir(),
+		Clock:   clock.NewMockAt(t, now),
 		PublishAuthorities: func(_ context.Context, roots []*x509.Certificate) error {
 			published = append([]*x509.Certificate(nil), roots...)
 			return nil
 		},
-		Now: func() time.Time { return now },
 	})
+	t.Cleanup(host.Close)
 	ctx := t.Context()
 	requireNoError(t, host.Initialize(ctx))
 	if len(published) != 1 || !published[0].Equal(root) {
@@ -85,6 +90,7 @@ func TestHostRejectsUnauthorizedResponse(t *testing.T) {
 	stream := &testAuthorityStream{snapshots: make(chan *issuerv1.AuthoritySnapshot, 1)}
 	stream.snapshots <- authoritySnapshot("v1", f.root, time.Now())
 	host := NewHost(HostConfig{
+		DataDir: t.TempDir(),
 		Plugin: &testPlugin{
 			stream: stream,
 			issue: func(*issuerv1.IssueX509SVIDRequest) *issuerv1.IssueX509SVIDResponse {
@@ -95,6 +101,7 @@ func TestHostRejectsUnauthorizedResponse(t *testing.T) {
 		},
 		PublishAuthorities: func(context.Context, []*x509.Certificate) error { return nil },
 	})
+	t.Cleanup(host.Close)
 	ctx := t.Context()
 	require.NoError(t, host.Initialize(ctx))
 	chain, err := host.Issue(ctx, f.template, f.proof, WorkloadSVID)
@@ -114,15 +121,16 @@ func TestHostActivatesOverlappingRolloverAndFailsClosedOnStreamError(t *testing.
 	published := make(chan []*x509.Certificate, 2)
 	failed := make(chan error, 1)
 	host := NewHost(HostConfig{
-		Plugin: &testPlugin{stream: stream},
+		Plugin:  &testPlugin{stream: stream},
+		DataDir: t.TempDir(),
+		Clock:   clock.NewMockAt(t, now),
 		PublishAuthorities: func(_ context.Context, roots []*x509.Certificate) error {
 			published <- roots
 			return nil
 		},
-		Now:       func() time.Time { return now },
-		ClockSkew: time.Minute,
-		OnError:   func(err error) { failed <- err },
+		OnError: func(err error) { failed <- err },
 	})
+	t.Cleanup(host.Close)
 	ctx := t.Context()
 	requireNoError(t, host.Initialize(ctx))
 	<-published
@@ -147,9 +155,6 @@ func TestHostActivatesOverlappingRolloverAndFailsClosedOnStreamError(t *testing.
 	case <-time.After(5 * time.Second):
 		t.Fatal("host did not report stream failure")
 	}
-	if _, err := host.active(); !errors.Is(err, ErrAuthorityTainted) {
-		t.Fatalf("host did not fail closed after stream error: %v", err)
-	}
 	if state := host.CheckHealth(); !state.Live || state.Ready {
 		t.Fatalf("unexpected health after stream failure: %+v", state)
 	}
@@ -163,9 +168,49 @@ func authoritySnapshot(version string, root *x509.Certificate, now time.Time) *i
 	}
 }
 
+func TestBundlePublisherRequiresReadBack(t *testing.T) {
+	root := makeRoot(t, "root", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	for _, tt := range []struct {
+		name       string
+		bundle     *common.Bundle
+		fetchErr   error
+		publishErr error
+		want       string
+	}{
+		{name: "present", bundle: &common.Bundle{RootCas: []*common.Certificate{{DerBytes: root.Raw}}}},
+		{name: "absent", want: "no bundle"},
+		{name: "missing root", bundle: &common.Bundle{}, want: "missing a root"},
+		{name: "failed read", fetchErr: errors.New("fetch failed"), want: "fetch failed"},
+		{name: "failed publish", publishErr: errors.New("append failed"), want: "append failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ds := &readbackStore{bundle: tt.bundle, err: tt.fetchErr}
+			publish := NewBundlePublisher(ds, "spiffe://example.org", func(context.Context, []*x509.Certificate) error { return tt.publishErr })
+			err := publish(t.Context(), []*x509.Certificate{root})
+			if tt.want != "" {
+				require.ErrorContains(t, err, tt.want)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+type readbackStore struct {
+	datastore.DataStore
+	bundle *common.Bundle
+	err    error
+}
+
+func (s *readbackStore) FetchBundle(context.Context, string) (*common.Bundle, error) {
+	return s.bundle, s.err
+}
+
 type testPlugin struct {
-	stream *testAuthorityStream
-	issue  func(*issuerv1.IssueX509SVIDRequest) *issuerv1.IssueX509SVIDResponse
+	stream       *testAuthorityStream
+	issue        func(*issuerv1.IssueX509SVIDRequest) *issuerv1.IssueX509SVIDResponse
+	issueContext func(context.Context, *issuerv1.IssueX509SVIDRequest) (*issuerv1.IssueX509SVIDResponse, error)
+	subscribe    func(context.Context) (AuthoritySnapshotStream, error)
 }
 
 func (*testPlugin) Name() string     { return "test" }
@@ -173,7 +218,10 @@ func (*testPlugin) Type() string     { return "X509SVIDIssuer" }
 func (*testPlugin) Version() string  { return "v1" }
 func (*testPlugin) IsExternal() bool { return false }
 
-func (p *testPlugin) IssueX509SVID(_ context.Context, req *issuerv1.IssueX509SVIDRequest) (*issuerv1.IssueX509SVIDResponse, error) {
+func (p *testPlugin) IssueX509SVID(ctx context.Context, req *issuerv1.IssueX509SVIDRequest) (*issuerv1.IssueX509SVIDResponse, error) {
+	if p.issueContext != nil {
+		return p.issueContext(ctx, req)
+	}
 	if p.issue == nil {
 		return nil, errors.New("unexpected issuance")
 	}
@@ -181,6 +229,9 @@ func (p *testPlugin) IssueX509SVID(_ context.Context, req *issuerv1.IssueX509SVI
 }
 
 func (p *testPlugin) SubscribeAuthoritySnapshots(ctx context.Context) (AuthoritySnapshotStream, error) {
+	if p.subscribe != nil {
+		return p.subscribe(ctx)
+	}
 	p.stream.ctx = ctx
 	return p.stream, nil
 }

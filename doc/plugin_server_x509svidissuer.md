@@ -12,7 +12,20 @@ CA to SPIRE, whereas `X509SVIDIssuer` signs the actual leaf certificates.
 
 At most one issuer may be configured. Without an issuer, SPIRE uses its existing
 local signer. Configuring an issuer routes server, Agent, and workload leaf
-issuance through it. JWT-SVIDs, WIT-SVIDs, and downstream CA issuance are unchanged.
+issuance through it. JWT-SVIDs and WIT-SVIDs retain the native key manager,
+rotation, signing and journal. Normal JWT/WIT enable/disable settings still
+apply; configuring an issuer does not enable a disabled token profile.
+Enabled `X509SVIDIssuer` and `UpstreamAuthority`
+plugins cannot be combined, regardless of their names. Disabled entries do not
+conflict. External mode rejects downstream CA signing before local key use
+(`FailedPrecondition` at the CA boundary; the existing SVID API maps signing
+failures to `Internal`). Native and upstream-only downstream issuance is unchanged.
+
+**The native CA and its root are intentionally retained.** SPIRE still creates,
+rotates and publishes its own CA alongside the external trust roots. This mode
+delegates leaf issuance; it does not eliminate native CA keys or make the external
+root the only trusted root. External leaf profiles do not borrow the native
+parent's expiration, issuer identity, AKI or signing key.
 
 ```hcl
 plugins {
@@ -34,8 +47,13 @@ The plugin streams versioned authority snapshots and returns a DER leaf,
 intermediates, and matching authority version for each issuance request. SPIRE
 validates the response before serving it. Plugin errors, invalid responses, and
 unavailable authority state fail issuance; they do not enable local fallback.
-Initialization requires an initial authority snapshot. A broken snapshot stream
-taints the active authority and makes the issuer readiness check fail.
+Initialization requires a usable committed authority within one minute.
+A broken snapshot stream invalidates readiness and in-flight responses.
+Only the subscription is retried, with bounded exponential backoff and jitter;
+issuance is never automatically replayed. Each issuance has a thirty-second
+timeout. A fresh validated session can recover an unchanged authority version.
+Health checks inspect current session/path validity without enrolling a leaf or
+generating a key. The reconnecting process remains live but not ready.
 
 Operators must deploy a trusted plugin and configuration: the plugin supplies
 trust roots for the trust domain, not merely untrusted certificate data.
@@ -66,8 +84,10 @@ Validity bounds are truncated to X.509 whole-second precision in both the reques
 and response checks. Shorter, currently valid certificates are accepted; no
 additional backdating or lifetime slack is permitted. Normal X.509 verification
 must succeed against the snapshot's trust roots, and supplied intermediates must
-match a verified path in leaf-to-root order, without roots, duplicates, or unused
-certificates.
+match a verified, advertised authority path in leaf-to-root order, without roots,
+duplicates, or unused certificates. Snapshot paths are ordered root-to-issuer.
+The host bounds CSR, certificate, response, path, snapshot and history sizes
+before accepting or mutating authority state.
 
 ## Development checkout
 
@@ -98,23 +118,40 @@ The process-level smoke test is documented in
 It uses an ordinary Agent and the standard Workload API, without workload-key
 extensions or a provider-specific adapter.
 
-## Current POC limitations
+## Publication, rollover and restart
 
-This is an isolated development POC, not a production-ready issuer integration:
+An authority is recorded as pending, its roots are appended through the native
+CA manager, and datastore read-back must confirm every root. Only after atomic
+persistence of committed preparation state can the host activate it. A blocked or
+failed publication cannot expose the candidate. A persistence failure stops
+issuance until the operator restores writable, intact state and restarts.
+Datastore read-back is not acknowledgement that every verifier has received trust.
 
-- The local CA manager still initializes. Leaf profile construction requires its
-  parent chain and caps lifetime against it, even for an external issuer.
-- Health checks perform real leaf issuance. Health and server rotation construct
-  proof CSRs even when the external issuer is not configured.
-- The authority store is in memory. Publication appends roots to the datastore;
-  its retention tracking alone does not establish durable rollover or retirement.
-- Authority activation precedes bundle publication. Concurrent issuance and
-  publication failures need additional lifecycle characterization.
-- Snapshot stream failure taints authority state; automatic stream recovery is
-  not implemented.
-- The synthetic fixture has an ephemeral root and a fixed version label. It is
-  not a production plugin or a restart/rollover implementation.
+The first usable committed authority activates immediately. Successors are
+published and prepared while the current authority remains active. Every ten
+seconds the host checks the current path's effective expiration, considering all
+certificates. Activation begins at expiration minus the lesser of one sixth of
+its preparation-to-expiration lifetime and seven days. Only a usable, committed,
+reobserved successor with improved expiration may replace it. Preparation age
+survives reconnect and restart. Retired versions cannot be reactivated.
 
-Lifecycle recovery, compatibility across supported version skew, real-provider
-qualification, and removal of residual local-CA coupling remain separate work.
-Do not infer full feature acceptance from the extraction smoke.
+Disjoint-root rollover publishes trust additively. Native bundle notifications,
+publication and pruning remain shared; old roots are not deleted to force a
+rollover. Expiration without a usable successor makes external issuance not ready.
+
+Public metadata is stored in `data_dir/x509svidissuer/authorities.json`, using
+SPIRE's private-file atomic-write helper. It contains public certificates,
+immutable version history and selection/preparation attribution, not signing keys
+or token data. Back up this file together with the normal server datastore and
+CA journal. Back up provider private material separately under the provider's
+own procedures. Missing metadata is first start; corrupt, unsupported or
+trailing metadata fails startup. Restart still requires a live provider session,
+validation, additive publication and read-back. Reusing a version with different
+certificate content is rejected.
+
+History is limited to 64 versions and metadata to 8 MiB. Exhaustion fails with
+an actionable error rather than silently deleting version evidence. There is no
+automatic old-state migration, concurrent-writer coordination, rollback or
+lost-state attribution guarantee, or atomic transaction across disk and the
+datastore. This isolated development feature is not a production qualification;
+supported-skew and real-provider validation must be reported separately.
