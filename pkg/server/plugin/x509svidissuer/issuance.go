@@ -18,7 +18,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func BuildIssueRequest(template *x509.Certificate, proofCSR []byte, svidType issuerv1.X509SVIDType, authorityVersion string) (*issuerv1.IssueX509SVIDRequest, error) {
+func BuildIssueRequest(template *x509.Certificate, csr []byte, svidType issuerv1.X509SVIDType, authorityVersion string) (*issuerv1.IssueX509SVIDRequest, error) {
 	if err := validateProfile(template); err != nil {
 		return nil, err
 	}
@@ -30,21 +30,21 @@ func BuildIssueRequest(template *x509.Certificate, proofCSR []byte, svidType iss
 	if strings.TrimSpace(authorityVersion) == "" {
 		return nil, errors.New("authority version is required")
 	}
-	if len(proofCSR) > maxCSRSize {
+	if len(csr) > maxCSRSize {
 		return nil, errors.New("proof CSR exceeds size limit")
 	}
-	if len(proofCSR) == 0 {
+	if len(csr) == 0 {
 		return nil, errors.New("proof CSR is required by configured external X509-SVID issuer")
 	}
-	csr, err := x509.ParseCertificateRequest(proofCSR)
-	if err != nil || csr.CheckSignature() != nil {
+	parsedCSR, err := x509.ParseCertificateRequest(csr)
+	if err != nil || parsedCSR.CheckSignature() != nil {
 		return nil, errors.New("proof CSR is invalid")
 	}
 	profileKey, err := x509.MarshalPKIXPublicKey(template.PublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("marshal profile public key: %w", err)
 	}
-	csrKey, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+	csrKey, err := x509.MarshalPKIXPublicKey(parsedCSR.PublicKey)
 	if err != nil || !bytes.Equal(profileKey, csrKey) {
 		return nil, errors.New("proof CSR public key does not match profile")
 	}
@@ -53,7 +53,7 @@ func BuildIssueRequest(template *x509.Certificate, proofCSR []byte, svidType iss
 		return nil, fmt.Errorf("marshal profile subject: %w", err)
 	}
 	return &issuerv1.IssueX509SVIDRequest{
-		ProofCsr: bytes.Clone(proofCSR),
+		Csr: bytes.Clone(csr),
 		Profile: &issuerv1.X509SVIDProfile{
 			Type:              svidType,
 			SpiffeId:          template.URIs[0].String(),

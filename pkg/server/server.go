@@ -499,13 +499,13 @@ func (s *Server) newNodeManager(cat catalog.Catalog, metrics telemetry.Metrics) 
 	return nodeManager
 }
 
-func (s *Server) newSVIDRotator(ctx context.Context, serverCA ca.ServerCA, metrics telemetry.Metrics, requireProofCSR bool) (*svid.Rotator, error) {
+func (s *Server) newSVIDRotator(ctx context.Context, serverCA ca.ServerCA, metrics telemetry.Metrics, requireCSR bool) (*svid.Rotator, error) {
 	svidRotator := svid.NewRotator(&svid.RotatorConfig{
-		ServerCA:        serverCA,
-		Log:             s.config.Log.WithField(telemetry.SubsystemName, telemetry.SVIDRotator),
-		Metrics:         metrics,
-		KeyType:         s.config.CAKeyType,
-		RequireProofCSR: requireProofCSR,
+		ServerCA:   serverCA,
+		Log:        s.config.Log.WithField(telemetry.SubsystemName, telemetry.SVIDRotator),
+		Metrics:    metrics,
+		KeyType:    s.config.CAKeyType,
+		RequireCSR: requireCSR,
 	})
 	if err := svidRotator.Initialize(ctx); err != nil {
 		return nil, err

@@ -121,7 +121,7 @@ func (s *Service) MintX509SVID(ctx context.Context, req *svidv1.MintX509SVIDRequ
 	x509SVID, err := s.ca.SignWorkloadX509SVID(ctx, ca.WorkloadX509SVIDParams{
 		SPIFFEID:  id,
 		PublicKey: csr.PublicKey,
-		ProofCSR:  req.Csr,
+		CSR:       req.Csr,
 		TTL:       time.Duration(req.Ttl) * time.Second,
 		DNSNames:  dnsNames,
 		Subject:   csr.Subject,
@@ -306,7 +306,7 @@ func (s *Service) newX509SVID(ctx context.Context, param *svidv1.NewX509SVIDPara
 	x509Svid, err := s.ca.SignWorkloadX509SVID(ctx, ca.WorkloadX509SVIDParams{
 		SPIFFEID:  spiffeID,
 		PublicKey: csr.PublicKey,
-		ProofCSR:  param.Csr,
+		CSR:       param.Csr,
 		DNSNames:  entry.GetDnsNames(),
 		TTL:       time.Duration(entry.GetX509SvidTtl()) * time.Second,
 	})

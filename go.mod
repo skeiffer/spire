@@ -346,4 +346,4 @@ require (
 )
 
 // Use the issuer contract fork until the plugin interface is available upstream.
-replace github.com/spiffe/spire-plugin-sdk => github.com/skeiffer/spire-plugin-sdk v1.15.4-0.20261105181409-7f742aec8e21
+replace github.com/spiffe/spire-plugin-sdk => github.com/skeiffer/spire-plugin-sdk v1.15.4-0.20261110005340-f7513e67db97

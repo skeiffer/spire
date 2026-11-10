@@ -111,15 +111,15 @@ func (s *RotatorTestSuite) TestRotationSucceeds() {
 	s.Require().NoError(<-errCh)
 }
 
-func (s *RotatorTestSuite) TestRotationConstructsProofCSR() {
-	s.r.c.RequireProofCSR = true
+func (s *RotatorTestSuite) TestRotationConstructsCSR() {
+	s.r.c.RequireCSR = true
 	err := s.r.Initialize(context.Background())
 	s.Require().NoError(err)
 
 	params := s.serverCA.LastServerX509SVIDParams()
-	s.Require().NotEmpty(params.ProofCSR, "server SVID issuance must carry a signer-generated proof CSR")
+	s.Require().NotEmpty(params.CSR, "server SVID issuance must carry a signer-generated CSR")
 
-	csr, err := x509.ParseCertificateRequest(params.ProofCSR)
+	csr, err := x509.ParseCertificateRequest(params.CSR)
 	s.Require().NoError(err)
 	s.Require().NoError(csr.CheckSignature())
 
@@ -130,9 +130,9 @@ func (s *RotatorTestSuite) TestRotationConstructsProofCSR() {
 	s.Equal(paramsPublicKey, csrPublicKey)
 }
 
-func (s *RotatorTestSuite) TestNativeRotationDoesNotConstructProofCSR() {
+func (s *RotatorTestSuite) TestNativeRotationDoesNotConstructCSR() {
 	s.Require().NoError(s.r.Initialize(context.Background()))
-	s.Empty(s.serverCA.LastServerX509SVIDParams().ProofCSR)
+	s.Empty(s.serverCA.LastServerX509SVIDParams().CSR)
 }
 
 func (s *RotatorTestSuite) TestForceRotation() {

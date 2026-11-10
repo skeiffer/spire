@@ -471,8 +471,8 @@ func (s *CATestSuite) TestSignWorkloadX509SVIDChangesSerialNumber() {
 	s.Require().NotEqual(0, svid2[0].SerialNumber.Cmp(svid1[0].SerialNumber))
 }
 
-func (s *CATestSuite) TestBuiltInX509SVIDIssuerIgnoresProofCSR() {
-	malformedProofCSR := []byte("not a CSR")
+func (s *CATestSuite) TestBuiltInX509SVIDIssuerIgnoresCSR() {
+	malformedCSR := []byte("not a CSR")
 
 	testCases := []struct {
 		name string
@@ -482,7 +482,7 @@ func (s *CATestSuite) TestBuiltInX509SVIDIssuerIgnoresProofCSR() {
 			name: "server",
 			sign: func() ([]*x509.Certificate, crypto.PublicKey, error) {
 				params := s.createServerX509SVIDParams()
-				params.ProofCSR = malformedProofCSR
+				params.CSR = malformedCSR
 				chain, err := s.ca.SignServerX509SVID(ctx, params)
 				return chain, params.PublicKey, err
 			},
@@ -491,7 +491,7 @@ func (s *CATestSuite) TestBuiltInX509SVIDIssuerIgnoresProofCSR() {
 			name: "agent",
 			sign: func() ([]*x509.Certificate, crypto.PublicKey, error) {
 				params := s.createAgentX509SVIDParams()
-				params.ProofCSR = malformedProofCSR
+				params.CSR = malformedCSR
 				chain, err := s.ca.SignAgentX509SVID(ctx, params)
 				return chain, params.PublicKey, err
 			},
@@ -500,7 +500,7 @@ func (s *CATestSuite) TestBuiltInX509SVIDIssuerIgnoresProofCSR() {
 			name: "workload",
 			sign: func() ([]*x509.Certificate, crypto.PublicKey, error) {
 				params := s.createWorkloadX509SVIDParams()
-				params.ProofCSR = malformedProofCSR
+				params.CSR = malformedCSR
 				chain, err := s.ca.SignWorkloadX509SVID(ctx, params)
 				return chain, params.PublicKey, err
 			},
@@ -531,7 +531,7 @@ func (s *CATestSuite) TestExternalX509SVIDIssuerDispatch() {
 			svidType: x509svidissuer.ServerSVID,
 			sign: func(proof []byte) ([]*x509.Certificate, error) {
 				params := s.createServerX509SVIDParams()
-				params.ProofCSR = proof
+				params.CSR = proof
 				return s.ca.SignServerX509SVID(ctx, params)
 			},
 		},
@@ -540,7 +540,7 @@ func (s *CATestSuite) TestExternalX509SVIDIssuerDispatch() {
 			svidType: x509svidissuer.AgentSVID,
 			sign: func(proof []byte) ([]*x509.Certificate, error) {
 				params := s.createAgentX509SVIDParams()
-				params.ProofCSR = proof
+				params.CSR = proof
 				return s.ca.SignAgentX509SVID(ctx, params)
 			},
 		},
@@ -549,7 +549,7 @@ func (s *CATestSuite) TestExternalX509SVIDIssuerDispatch() {
 			svidType: x509svidissuer.WorkloadSVID,
 			sign: func(proof []byte) ([]*x509.Certificate, error) {
 				params := s.createWorkloadX509SVIDParams()
-				params.ProofCSR = proof
+				params.CSR = proof
 				return s.ca.SignWorkloadX509SVID(ctx, params)
 			},
 		},

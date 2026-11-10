@@ -155,7 +155,7 @@ func (h *Host) activeLocked() (Snapshot, error) {
 	return record.snapshot, nil
 }
 
-func (h *Host) Issue(ctx context.Context, template *x509.Certificate, proofCSR []byte, svidType SVIDType) ([]*x509.Certificate, error) {
+func (h *Host) Issue(ctx context.Context, template *x509.Certificate, csr []byte, svidType SVIDType) ([]*x509.Certificate, error) {
 	h.mu.Lock()
 	snapshot, err := h.activeLocked()
 	generation := h.generation
@@ -173,7 +173,7 @@ func (h *Host) Issue(ctx context.Context, template *x509.Certificate, proofCSR [
 	if err != nil {
 		return nil, err
 	}
-	req, err := BuildIssueRequest(authorized, proofCSR, svidType, snapshot.Version)
+	req, err := BuildIssueRequest(authorized, csr, svidType, snapshot.Version)
 	if err != nil {
 		return nil, err
 	}

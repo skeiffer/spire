@@ -563,7 +563,7 @@ func TestServiceMintX509SVID(t *testing.T) {
 			require.NotNil(t, resp)
 			require.NotNil(t, resp.Svid)
 			if tt.name == "success" {
-				require.Equal(t, csr, test.ca.LastWorkloadX509SVIDParams().ProofCSR,
+				require.Equal(t, csr, test.ca.LastWorkloadX509SVIDParams().CSR,
 					"the original validated proof CSR must reach the issuer boundary")
 			}
 

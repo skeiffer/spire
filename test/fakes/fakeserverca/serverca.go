@@ -245,18 +245,18 @@ func (c *CA) LastWorkloadX509SVIDParams() ca.WorkloadX509SVIDParams {
 }
 
 func cloneServerParams(params ca.ServerX509SVIDParams) ca.ServerX509SVIDParams {
-	params.ProofCSR = append([]byte(nil), params.ProofCSR...)
+	params.CSR = append([]byte(nil), params.CSR...)
 	return params
 }
 
 func cloneAgentParams(params ca.AgentX509SVIDParams) ca.AgentX509SVIDParams {
-	params.ProofCSR = append([]byte(nil), params.ProofCSR...)
+	params.CSR = append([]byte(nil), params.CSR...)
 	return params
 }
 
 func cloneWorkloadParams(params ca.WorkloadX509SVIDParams) ca.WorkloadX509SVIDParams {
 	params.DNSNames = append([]string(nil), params.DNSNames...)
-	params.ProofCSR = append([]byte(nil), params.ProofCSR...)
+	params.CSR = append([]byte(nil), params.CSR...)
 	return params
 }
 

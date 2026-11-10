@@ -169,7 +169,7 @@ func (p *plugin) IssueX509SVID(_ context.Context, req *issuerv1.IssueX509SVIDReq
 	if profile == nil {
 		return nil, status.Error(codes.InvalidArgument, "profile is required")
 	}
-	csr, err := x509.ParseCertificateRequest(req.GetProofCsr())
+	csr, err := x509.ParseCertificateRequest(req.GetCsr())
 	if err != nil || csr.CheckSignature() != nil {
 		return nil, status.Error(codes.InvalidArgument, "proof CSR is invalid")
 	}
